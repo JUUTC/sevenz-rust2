@@ -13,6 +13,7 @@
 //! | BROTLI (*)     | ✓             | ✓           |
 //! | BZIP2          | ✓             | ✓           |
 //! | DEFLATE (*)    | ✓             | ✓           |
+//! | DEFLATE64 (*)  | ✓             |             |
 //! | PPMD           | ✓             | ✓           |
 //! | LZ4 (*)        | ✓             | ✓           |
 //! | ZSTD (*)       | ✓             | ✓           |
@@ -33,6 +34,18 @@
 //! | DELTA         | ✓             | ✓           |
 //! | SWAP2         | ✓             | ✓           |
 //! | SWAP4         | ✓             | ✓           |
+//!
+//! ## Optional Features
+//!
+//! | Feature   | Description                                   |
+//! |-----------|-----------------------------------------------|
+//! | brotli    | Brotli compression codec                      |
+//! | deflate   | Deflate compression codec                     |
+//! | deflate64 | Deflate64 decompression codec                 |
+//! | lz4       | LZ4 compression codec                         |
+//! | zstd      | Zstandard compression codec                   |
+//! | mmap      | Memory-mapped file I/O for better performance |
+//! | tokio     | Async/await support with tokio                |
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
@@ -62,6 +75,8 @@ mod time;
 mod util;
 #[cfg(feature = "tokio")]
 pub mod async_support;
+#[cfg(feature = "mmap")]
+pub mod mmap;
 
 /// Performance tuning utilities.
 pub mod perf;

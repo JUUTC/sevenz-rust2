@@ -340,13 +340,16 @@ archive.set_content_methods(vec![
 
 **Current State:** Method ID defined, no implementation.
 
-**Impact:** Very rare usage.
+**Impact:** Very rare usage. The LZS codec (ID 0x04F71105) implements LZSS compression.
+
+**Availability:** The `lzs` Rust crate provides LZSS compression but may not be 100% compatible with 7-Zip's LZS format. Testing needed.
 
 **Implementation Plan:**
-1. Find/create LZS implementation
-2. Integrate with codec system
+1. Test `lzs` crate for 7-Zip compatibility
+2. If compatible, add as optional feature
+3. If incompatible, may need custom implementation
 
-**Estimated Effort:** Medium
+**Estimated Effort:** Medium (depends on compatibility)
 
 ---
 
@@ -354,13 +357,17 @@ archive.set_content_methods(vec![
 
 **Current State:** Method ID defined, no implementation.
 
-**Impact:** Very rare usage.
+**Impact:** Very rare usage. Lizard is a fast compression algorithm.
+
+**Availability:** **No Rust implementation exists.** The only option would be:
+1. FFI bindings to C library (adds complexity)
+2. Pure Rust port of the algorithm (significant effort)
 
 **Implementation Plan:**
-1. Find/create LIZARD implementation
-2. Integrate with codec system
+1. Monitor for Rust implementations
+2. Consider FFI bindings if demand justifies
 
-**Estimated Effort:** Medium
+**Estimated Effort:** High (no Rust library available)
 
 ---
 
@@ -408,15 +415,44 @@ if reader.supports_parallel_decompression() {
 
 ---
 
-### O2: Memory-Mapped File Support
+### O2: Memory-Mapped File Support ✅ COMPLETED
 
-**Current State:** Standard Read/Seek traits used.
+**Current State:** Optional `mmap` feature using `memmap2` crate.
 
-**Potential:** Memory mapping can improve performance for large files.
+**What was implemented:**
+- New `mmap` module with `MmapReader` and `MmapArchiveReader`
+- Zero-copy file access through kernel page cache
+- Automatic caching based on OS page management
+- Read-only mappings for safety
+- Same API as `ArchiveReader` for easy adoption
 
-**Implementation:**
-1. Add optional `memmap2` dependency
-2. Provide memory-mapped reader variant
+**Usage:**
+```toml
+[dependencies]
+sevenz-rust2 = { version = "0.20", features = ["mmap"] }
+```
+
+```rust
+use sevenz_rust2::mmap::MmapArchiveReader;
+use sevenz_rust2::Password;
+
+// Open archive with memory mapping for best performance
+let mut reader = MmapArchiveReader::open("large_archive.7z", Password::empty())?;
+
+// Use just like regular ArchiveReader
+for entry in reader.entries() {
+    println!("Entry: {}", entry.name());
+}
+
+// Read specific files with excellent random access performance
+let data = reader.read_file("path/to/file.txt")?;
+```
+
+**Performance Benefits:**
+- Zero-copy access: Data read directly from kernel page cache
+- Reduced syscalls: No read() syscalls for each chunk
+- Better random access: Excellent for non-solid archives
+- Automatic caching: OS manages memory based on access patterns
 
 ---
 
@@ -479,7 +515,7 @@ let custom_config = BufferConfig::new(128 * 1024); // 128KB
 ### Phase 6 (Optimizations)
 15. [x] Larger internal buffers (64KB default) - **COMPLETED**
 16. [x] Parallel decompression detection API - **COMPLETED**
-17. Memory-mapped file support
+17. [x] Memory-mapped file support - **COMPLETED** (optional `mmap` feature)
 
 ---
 
