@@ -23,6 +23,7 @@ pub struct BoundedReader<R: Read> {
 }
 
 impl<R: Read> BoundedReader<R> {
+    #[inline]
     pub fn new(inner: R, max_size: usize) -> Self {
         Self {
             inner,
@@ -32,6 +33,7 @@ impl<R: Read> BoundedReader<R> {
 }
 
 impl<R: Read> Read for BoundedReader<R> {
+    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.remain == 0 {
             return Ok(0);
@@ -112,6 +114,7 @@ struct Crc32VerifyingReader<R> {
 }
 
 impl<R: Read> Crc32VerifyingReader<R> {
+    #[inline]
     fn new(inner: R, remaining: usize, expected_value: u64) -> Self {
         Self {
             inner,
@@ -989,6 +992,7 @@ fn assert_usize(size: u64, field: &str) -> Result<usize, Error> {
     Ok(size as usize)
 }
 
+#[inline]
 fn read_variable_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
     let first = reader.read_u8()? as u64;
     let mut mask = 0x80_u64;
@@ -1004,19 +1008,19 @@ fn read_variable_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
     Ok(value)
 }
 
+#[inline]
 fn read_all_or_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> {
     let all = header.read_u8()?;
     if all != 0 {
         let mut bits = BitSet::with_capacity(size);
-        for i in 0..size {
-            bits.insert(i);
-        }
+        bits.set_all(size);
         Ok(bits)
     } else {
         read_bits(header, size)
     }
 }
 
+#[inline]
 fn read_bits<R: Read>(header: &mut R, size: usize) -> io::Result<BitSet> {
     let mut bits = BitSet::with_capacity(size);
     let mut mask = 0u32;

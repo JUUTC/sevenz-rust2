@@ -126,7 +126,10 @@ impl SegmentedWriter {
     pub fn get_first_volume_mut(&mut self) -> io::Result<File> {
         self.current_file.flush()?;
         let first_volume_path = self.config.volume_path(1);
-        File::options().write(true).read(true).open(first_volume_path)
+        File::options()
+            .write(true)
+            .read(true)
+            .open(first_volume_path)
     }
 
     /// Finishes writing and returns metadata about the created volumes.
@@ -150,7 +153,10 @@ impl Write for SegmentedWriter {
     /// Callers should use `write_all()` to ensure all data is written, or handle
     /// partial writes appropriately by calling `write()` again with the remaining data.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let remaining_in_volume = self.config.volume_size.saturating_sub(self.current_volume_bytes);
+        let remaining_in_volume = self
+            .config
+            .volume_size
+            .saturating_sub(self.current_volume_bytes);
 
         // If we've exceeded the volume size, switch to next volume
         if remaining_in_volume == 0 {
@@ -191,10 +197,7 @@ impl Seek for SegmentedWriter {
                     // Need to switch to a different volume
                     self.current_file.flush()?;
                     let target_path = self.config.volume_path(target_volume);
-                    self.current_file = File::options()
-                        .read(true)
-                        .write(true)
-                        .open(target_path)?;
+                    self.current_file = File::options().read(true).write(true).open(target_path)?;
                     self.current_volume = target_volume;
                 }
 

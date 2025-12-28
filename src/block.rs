@@ -19,15 +19,18 @@ pub struct Block {
 }
 
 impl Block {
+    #[inline]
     pub(crate) fn find_bind_pair_for_in_stream(&self, index: u64) -> Option<&BindPair> {
         self.bind_pairs.iter().find(|bp| bp.in_index == index)
     }
 
+    #[inline]
     pub(crate) fn find_bind_pair_for_out_stream(&self, index: u64) -> Option<&BindPair> {
         self.bind_pairs.iter().find(|bp| bp.out_index == index)
     }
 
     /// Returns the total uncompressed size of data in this block.
+    #[inline]
     pub fn get_unpack_size(&self) -> u64 {
         if self.total_output_streams == 0 {
             return 0;
@@ -57,6 +60,7 @@ impl Block {
     ///
     /// # Arguments
     /// * `index` - The index of the coder to get the unpack size for
+    #[inline]
     pub fn get_unpack_size_at_index(&self, index: usize) -> u64 {
         self.unpack_sizes.get(index).cloned().unwrap_or_default()
     }
@@ -88,10 +92,12 @@ impl Coder {
     ///
     /// This ID identifies the specific compression method, filter, or encryption
     /// method used by this coder.
+    #[inline]
     pub fn encoder_method_id(&self) -> &[u8] {
         &self.encoder_method_id[0..self.id_size]
     }
 
+    #[inline]
     pub(crate) fn decompression_method_id_mut(&mut self) -> &mut [u8] {
         &mut self.encoder_method_id[0..self.id_size]
     }

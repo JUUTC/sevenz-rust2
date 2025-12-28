@@ -36,12 +36,13 @@ impl BitSet {
     }
 
     /// Returns `true` if this set contains the specified value.
+    #[inline]
     pub(crate) fn contains(&self, value: usize) -> bool {
         if value >= self.bit_count {
             return false;
         }
 
-        let (block_idx, bit_idx) = self.bit_indices(value);
+        let (block_idx, bit_idx) = Self::bit_indices_static(value);
         if block_idx >= self.bits.len() {
             return false;
         }
@@ -52,36 +53,43 @@ impl BitSet {
     /// Adds a value to the set.
     ///
     /// Returns `false` if the value was already present in the set.
+    #[inline]
     pub(crate) fn insert(&mut self, value: usize) -> bool {
-        if self.contains(value) {
-            return false;
-        }
-
         if value >= self.bit_count {
             self.grow(value + 1);
         }
 
-        let (block_idx, bit_idx) = self.bit_indices(value);
-        self.bits[block_idx] |= 1 << bit_idx;
+        let (block_idx, bit_idx) = Self::bit_indices_static(value);
+        let mask = 1 << bit_idx;
+        let was_set = (self.bits[block_idx] & mask) != 0;
+        self.bits[block_idx] |= mask;
 
-        true
+        !was_set
     }
 
     /// Removes a value from the set.
     ///
     /// Returns `true` if the value was present in the set.
+    #[inline]
     pub(crate) fn remove(&mut self, value: usize) -> bool {
-        if !self.contains(value) {
+        if value >= self.bit_count {
             return false;
         }
 
-        let (block_idx, bit_idx) = self.bit_indices(value);
-        self.bits[block_idx] &= !(1 << bit_idx);
+        let (block_idx, bit_idx) = Self::bit_indices_static(value);
+        if block_idx >= self.bits.len() {
+            return false;
+        }
 
-        true
+        let mask = 1 << bit_idx;
+        let was_set = (self.bits[block_idx] & mask) != 0;
+        self.bits[block_idx] &= !mask;
+
+        was_set
     }
 
     /// Computes how many blocks are needed to store that many bits.
+    #[inline]
     fn blocks_for_bits(bits: usize) -> usize {
         if bits == 0 {
             return 0;
@@ -90,7 +98,8 @@ impl BitSet {
     }
 
     /// Computes the block index and bit index for a given bit position.
-    fn bit_indices(&self, bit_pos: usize) -> (usize, usize) {
+    #[inline]
+    fn bit_indices_static(bit_pos: usize) -> (usize, usize) {
         (
             bit_pos / usize::BITS as usize,
             bit_pos % usize::BITS as usize,
@@ -127,6 +136,46 @@ impl BitSet {
             self.bit_count = count;
         }
     }
+
+    /// Sets all bits from 0 to `count-1` to true.
+    /// This is more efficient than calling `insert` for each bit individually.
+    #[inline]
+    pub(crate) fn set_all(&mut self, count: usize) {
+        if count == 0 {
+            return;
+        }
+
+        // Ensure we have enough capacity
+        if count > self.bit_count {
+            self.grow(count);
+        }
+
+        let full_blocks = count / usize::BITS as usize;
+        let remaining_bits = count % usize::BITS as usize;
+
+        // Set all full blocks to all 1s
+        for block in self.bits.iter_mut().take(full_blocks) {
+            *block = usize::MAX;
+        }
+
+        // Set the remaining bits in the last partial block
+        if remaining_bits > 0 && full_blocks < self.bits.len() {
+            self.bits[full_blocks] |= (1_usize << remaining_bits) - 1;
+        }
+    }
+
+    /// Provides read-only access to the underlying bits storage.
+    /// Each element represents usize::BITS bits.
+    #[inline]
+    pub(crate) fn as_raw(&self) -> &[usize] {
+        &self.bits
+    }
+
+    /// Returns the total bit capacity of this bitset.
+    #[inline]
+    pub(crate) fn bit_count(&self) -> usize {
+        self.bit_count
+    }
 }
 
 impl Default for BitSet {
@@ -145,20 +194,34 @@ impl fmt::Debug for BitSet {
 pub(crate) fn write_bit_set<W: Write>(mut write: W, bs: &BitSet) -> std::io::Result<()> {
     use crate::ByteWriter;
 
-    let mut cache = 0;
-    let mut shift = 7;
-    for i in 0..bs.bit_count {
-        let set = if bs.contains(i) { 1 } else { 0 };
-        cache |= set << shift;
-        shift -= 1;
-        if shift < 0 {
-            write.write_u8(cache)?;
-            shift = 7;
-            cache = 0;
+    let bit_count = bs.bit_count();
+    let raw_bits = bs.as_raw();
+    let mut byte = 0u8;
+    let mut byte_bit_pos = 7i32;
+
+    for i in 0..bit_count {
+        // Calculate which usize block and which bit within that block
+        let block_idx = i / usize::BITS as usize;
+        let bit_in_block = i % usize::BITS as usize;
+
+        let is_set = if block_idx < raw_bits.len() {
+            (raw_bits[block_idx] >> bit_in_block) & 1
+        } else {
+            0
+        };
+
+        byte |= (is_set as u8) << byte_bit_pos;
+        byte_bit_pos -= 1;
+
+        if byte_bit_pos < 0 {
+            write.write_u8(byte)?;
+            byte_bit_pos = 7;
+            byte = 0;
         }
     }
-    if shift != 7 {
-        write.write_u8(cache)?;
+
+    if byte_bit_pos != 7 {
+        write.write_u8(byte)?;
     }
     Ok(())
 }
@@ -264,5 +327,40 @@ mod tests {
             mask >>= 1;
         }
         Ok(bits)
+    }
+
+    #[test]
+    fn test_bitset_set_all() {
+        // Test with a small size that fits in one block
+        let mut bs = BitSet::with_capacity(16);
+        bs.set_all(16);
+        assert_eq!(bs.len(), 16);
+        for i in 0..16 {
+            assert!(bs.contains(i), "Bit {i} should be set");
+        }
+        assert!(!bs.contains(16));
+
+        // Test with size that spans multiple blocks
+        let mut bs2 = BitSet::with_capacity(100);
+        bs2.set_all(100);
+        assert_eq!(bs2.len(), 100);
+        for i in 0..100 {
+            assert!(bs2.contains(i), "Bit {i} should be set");
+        }
+        assert!(!bs2.contains(100));
+
+        // Test with zero size
+        let mut bs3 = BitSet::new();
+        bs3.set_all(0);
+        assert_eq!(bs3.len(), 0);
+
+        // Test partial block
+        let mut bs4 = BitSet::with_capacity(70);
+        bs4.set_all(70);
+        assert_eq!(bs4.len(), 70);
+        for i in 0..70 {
+            assert!(bs4.contains(i), "Bit {i} should be set");
+        }
+        assert!(!bs4.contains(70));
     }
 }
