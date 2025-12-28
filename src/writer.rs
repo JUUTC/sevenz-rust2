@@ -22,9 +22,9 @@ use crc32fast::Hasher;
 
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
-pub(crate) use self::seq_reader::SeqReader;
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::segmented_writer::{SegmentedWriter, VolumeConfig, VolumeMetadata};
+pub(crate) use self::seq_reader::SeqReader;
 pub use self::source_reader::SourceReader;
 use self::{pack_info::PackInfo, unpack_info::UnpackInfo};
 use crate::{
@@ -677,6 +677,7 @@ impl<W: Write + Seek> AutoFinish for ArchiveWriter<W> {
     }
 }
 
+#[inline]
 pub(crate) fn write_u64<W: Write>(header: &mut W, mut value: u64) -> std::io::Result<()> {
     let mut first = 0;
     let mut mask = 0x80;
@@ -702,7 +703,6 @@ pub(crate) fn write_u64<W: Write>(header: &mut W, mut value: u64) -> std::io::Re
 struct CompressWrapWriter<'a, W> {
     writer: W,
     crc: Hasher,
-    cache: Vec<u8>,
     bytes_written: &'a mut usize,
 }
 
@@ -711,7 +711,6 @@ impl<'a, W: Write> CompressWrapWriter<'a, W> {
         Self {
             writer,
             crc: Hasher::new(),
-            cache: Vec::with_capacity(8192),
             bytes_written,
         }
     }
@@ -723,8 +722,8 @@ impl<'a, W: Write> CompressWrapWriter<'a, W> {
 }
 
 impl<W: Write> Write for CompressWrapWriter<'_, W> {
+    #[inline]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.cache.resize(buf.len(), Default::default());
         let len = self.writer.write(buf)?;
         self.crc.update(&buf[..len]);
         *self.bytes_written += len;

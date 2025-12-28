@@ -83,9 +83,7 @@ fn test_multi_volume_empty_archive() {
 
     // Add only a directory entry (no data stream)
     let entry = ArchiveEntry::new_directory("empty_dir");
-    writer
-        .push_archive_entry::<&[u8]>(entry, None)
-        .unwrap();
+    writer.push_archive_entry::<&[u8]>(entry, None).unwrap();
 
     let metadata = writer.finish_multi_volume().unwrap();
 
