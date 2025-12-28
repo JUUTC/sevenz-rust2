@@ -90,7 +90,7 @@ archive.push_archive_entry(ArchiveEntry::new_file("downloaded.dat"), Some(downlo
 archive.finish()?;
 ```
 
-### Current Limitation: Output Requires Seek
+### Output Requires Write + Seek
 
 The 7z format requires writing a header at file start that references the end-of-file position. This means:
 
@@ -99,7 +99,37 @@ The 7z format requires writing a header at file start that references the end-of
 impl<W: Write + Seek> ArchiveWriter<W>
 ```
 
-**Workaround for pure streaming output:**
+**This works directly with cloud storage that supports seeking:**
+
+If your Azure Storage wrapper implements `Write + Seek` (reading/seeking to arbitrary positions), 
+it will work directly with `ArchiveWriter::new()` - no local buffering required:
+
+```rust
+use sevenz_rust2::*;
+
+// Your Azure blob wrapper that implements Write + Seek
+struct AzureBlobWriter { /* ... */ }
+impl std::io::Write for AzureBlobWriter { /* ... */ }
+impl std::io::Seek for AzureBlobWriter { /* ... */ }
+
+// Direct streaming to Azure - works for TB-scale data!
+let azure_writer = AzureBlobWriter::new("container/archive.7z");
+let mut archive = ArchiveWriter::new(azure_writer)?;
+
+// Stream input data (from cache, downloads, etc.)
+for file_info in cached_files {
+    let entry = ArchiveEntry::new_file(&file_info.name);
+    archive.push_archive_entry(entry, Some(file_info.reader))?;
+}
+
+archive.finish()?; // Seeks to start, writes header, done
+```
+
+The seek operations are minimal:
+1. Initial seek to byte 32 (skip signature header placeholder)
+2. Final seek to byte 0 to write the 32-byte start header
+
+**For pure streaming outputs (no seek support):**
 1. Write to a temporary seekable buffer (file or `Vec<u8>`)
 2. Then stream that buffer to final destination
 
