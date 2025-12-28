@@ -255,7 +255,7 @@ impl Archive {
     fn read_header<R: Read + Seek>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
         let mut nid = header.read_u8()?;
         if nid == K_ARCHIVE_PROPERTIES {
-            Self::read_archive_properties(header)?;
+            Self::read_archive_properties(header, archive)?;
             nid = header.read_u8()?;
         }
 
@@ -277,11 +277,34 @@ impl Archive {
         Ok(())
     }
 
-    fn read_archive_properties<R: Read + Seek>(header: &mut R) -> Result<(), Error> {
+    fn read_archive_properties<R: Read + Seek>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
         let mut nid = header.read_u8()?;
         while nid != K_END {
             let property_size = read_variable_usize(header, "propertySize")?;
-            header.seek(SeekFrom::Current(property_size as i64))?;
+            if nid == K_COMMENT {
+                // Read comment as UTF-16LE
+                let mut bytes = vec![0u8; property_size];
+                header.read_exact(&mut bytes)?;
+
+                // Convert from UTF-16LE to String
+                if bytes.len() >= 2 {
+                    let utf16: Vec<u16> = bytes
+                        .chunks_exact(2)
+                        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                        .take_while(|&c| c != 0) // Stop at null terminator
+                        .collect();
+
+                    if let Ok(comment) = String::from_utf16(&utf16) {
+                        archive.comment = Some(comment);
+                    }
+                }
+            } else {
+                // Skip unknown properties
+                header.seek(SeekFrom::Current(property_size as i64))?;
+            }
             nid = header.read_u8()?;
         }
         Ok(())
@@ -587,7 +610,21 @@ impl Archive {
                         }
                     }
                 }
-                K_START_POS => return Err(Error::other("kStartPos is unsupported, please report")),
+                K_START_POS => {
+                    let positions_defined = read_all_or_bits(header, num_files)?;
+                    let external = header.read_u8()?;
+                    if external != 0 {
+                        return Err(Error::other(format!(
+                            "kStartPos Unimplemented:external={external}"
+                        )));
+                    }
+                    for (i, file) in files.iter_mut().enumerate() {
+                        file.has_start_pos = positions_defined.contains(i);
+                        if file.has_start_pos {
+                            file.start_pos = header.read_u64()?;
+                        }
+                    }
+                }
                 K_DUMMY => {
                     header.seek(SeekFrom::Current(size as i64))?;
                 }
@@ -1190,6 +1227,34 @@ impl<R: Read + Seek> ArchiveReader<R> {
         &self.archive
     }
 
+    /// Returns true if this archive can benefit from parallel file decompression.
+    ///
+    /// Non-solid archives have blocks that can be decompressed independently
+    /// in parallel. Solid archives must be decompressed sequentially because
+    /// files depend on previous data within the same block.
+    ///
+    /// Use this to decide whether to use multi-threaded decompression strategies.
+    #[inline]
+    pub fn supports_parallel_decompression(&self) -> bool {
+        !self.archive.is_solid
+    }
+
+    /// Returns the number of blocks (compression units) in the archive.
+    ///
+    /// Each block is an independent compression unit that can be decompressed
+    /// separately. Note that a single block may contain multiple files.
+    /// For solid archives, this is typically 1 (all files in one block).
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.archive.blocks.len()
+    }
+
+    /// Returns an iterator over the entries (files/directories) in the archive.
+    #[inline]
+    pub fn entries(&self) -> impl Iterator<Item = &ArchiveEntry> {
+        self.archive.files.iter()
+    }
+
     fn build_decode_stack<'r>(
         source: &'r mut R,
         archive: &Archive,
@@ -1572,6 +1637,69 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         Ok(())
     }
+
+    /// Tests the integrity of the archive by decompressing all entries and verifying CRCs.
+    ///
+    /// This is equivalent to 7z's `-t` (test) flag. It validates:
+    /// - Header integrity (signature and CRC)
+    /// - Compressed data can be decompressed successfully
+    /// - File CRCs match (when available)
+    ///
+    /// # Returns
+    /// - `Ok(TestResult)` containing statistics about the test
+    /// - `Err(Error)` if any integrity check fails
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::{ArchiveReader, Password};
+    ///
+    /// let mut reader = ArchiveReader::open("archive.7z", Password::empty()).unwrap();
+    /// let result = reader.test_integrity().unwrap();
+    /// println!("Tested {} files, {} bytes", result.files_tested, result.bytes_tested);
+    /// ```
+    pub fn test_integrity(&mut self) -> Result<TestResult, Error> {
+        let mut result = TestResult {
+            files_tested: 0,
+            bytes_tested: 0,
+            crcs_verified: 0,
+        };
+
+        // Test all entries by decompressing them
+        self.for_each_entries(|entry, reader| {
+            // Read all data to trigger CRC verification
+            let mut bytes_read = 0u64;
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                bytes_read += n as u64;
+            }
+
+            result.files_tested += 1;
+            result.bytes_tested += bytes_read;
+            if entry.has_crc {
+                result.crcs_verified += 1;
+            }
+            Ok(true)
+        })?;
+
+        Ok(result)
+    }
+}
+
+/// Result of an archive integrity test.
+///
+/// Contains statistics about what was tested during the integrity check.
+#[derive(Debug, Clone, Default)]
+pub struct TestResult {
+    /// Number of files that were decompressed and tested.
+    pub files_tested: usize,
+    /// Total bytes decompressed during the test.
+    pub bytes_tested: u64,
+    /// Number of files whose CRC was verified.
+    pub crcs_verified: usize,
 }
 
 /// Decoder for a specific block within a 7z archive.

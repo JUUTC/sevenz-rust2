@@ -403,3 +403,41 @@ fn compress_with_lz4_skippable_algorithm() {
 fn compress_with_zstd_algorithm() {
     test_compression_method(&[EncoderMethod::ZSTD.into()]);
 }
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn compress_with_comment() {
+    let temp_dir = tempdir().unwrap();
+    let source = temp_dir.path().join("file.txt");
+    std::fs::write(&source, "test content").unwrap();
+    let dest = temp_dir.path().join("commented.7z");
+
+    // Create archive with comment
+    let comment_text = "Test archive comment - created by sevenz-rust2";
+    {
+        let mut archive = ArchiveWriter::create(&dest).unwrap();
+        archive.set_comment(comment_text);
+        let entry = ArchiveEntry::from_path(&source, "file.txt".to_string());
+        archive
+            .push_archive_entry(entry, Some(File::open(&source).unwrap()))
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    // Read archive and verify comment
+    {
+        let archive_reader =
+            ArchiveReader::open(&dest, Password::empty()).unwrap();
+        assert_eq!(archive_reader.archive().comment(), Some(comment_text));
+    }
+
+    // Also verify the archive can be decompressed correctly
+    let decompress_dest = temp_dir.path().join("decompress");
+    decompress_file(&dest, &decompress_dest).expect("decompress ok");
+    let decompress_file = decompress_dest.join("file.txt");
+    assert!(decompress_file.exists());
+    assert_eq!(
+        std::fs::read_to_string(&decompress_file).unwrap(),
+        "test content"
+    );
+}

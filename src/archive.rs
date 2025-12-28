@@ -30,10 +30,23 @@ pub(crate) const K_A_TIME: u8 = 0x13;
 pub(crate) const K_M_TIME: u8 = 0x14;
 pub(crate) const K_WIN_ATTRIBUTES: u8 = 0x15;
 
-/// TODO: Implement reading & writing comments
-#[allow(unused)]
+/// Archive comment constant (0x16).
+///
+/// # 7-Zip Specification
+///
+/// Comments are stored in the ArchiveProperties section as UTF-16LE text.
+/// Property ID 0x16 followed by size and UTF-16LE encoded string.
+/// This matches the 7-Zip.org implementation exactly.
 pub(crate) const K_COMMENT: u8 = 0x16;
 pub(crate) const K_ENCODED_HEADER: u8 = 0x17;
+
+/// Start position for sparse files (0x18).
+///
+/// # 7-Zip Specification
+///
+/// The kStartPos property specifies the starting position within the
+/// uncompressed data for sparse file support. This is rarely used
+/// but required for full compatibility with archives created by 7-Zip.
 pub(crate) const K_START_POS: u8 = 0x18;
 pub(crate) const K_DUMMY: u8 = 0x19;
 
@@ -57,6 +70,8 @@ pub struct Archive {
     pub stream_map: StreamMap,
     /// Whether this is a solid archive (better compression, slower random access).
     pub is_solid: bool,
+    /// Optional archive comment.
+    pub comment: Option<String>,
 }
 
 impl Archive {
@@ -70,6 +85,11 @@ impl Archive {
     /// Used for calculating byte ranges when streaming.
     pub fn pack_sizes(&self) -> &[u64] {
         &self.pack_sizes
+    }
+
+    /// Returns the archive comment, if any.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 }
 
@@ -120,6 +140,10 @@ pub struct ArchiveEntry {
     pub size: u64,
     /// Compressed size in bytes.
     pub compressed_size: u64,
+    /// Whether start position is present (for sparse files).
+    pub has_start_pos: bool,
+    /// Start position within the uncompressed file data (for sparse files).
+    pub start_pos: u64,
 }
 
 impl ArchiveEntry {
@@ -311,6 +335,10 @@ impl EncoderMethod {
     pub const ID_COPY: &'static [u8] = &[0x00];
     /// Method ID for Delta filter.
     pub const ID_DELTA: &'static [u8] = &[0x03];
+    /// Method ID for Swap2 filter (byte-swapping for 16-bit data).
+    pub const ID_SWAP2: &'static [u8] = &[0x03, 0x02];
+    /// Method ID for Swap4 filter (byte-swapping for 32-bit data).
+    pub const ID_SWAP4: &'static [u8] = &[0x03, 0x04];
 
     /// Method ID for LZMA compression.
     pub const ID_LZMA: &'static [u8] = &[0x03, 0x01, 0x01];
@@ -403,6 +431,10 @@ impl EncoderMethod {
     pub const DELTA_FILTER: Self = Self("DELTA", Self::ID_DELTA);
     /// BCJ2 filter method.
     pub const BCJ2_FILTER: Self = Self("BCJ2", Self::ID_BCJ2);
+    /// Swap2 filter method (byte-swapping for 16-bit aligned data).
+    pub const SWAP2_FILTER: Self = Self("SWAP2", Self::ID_SWAP2);
+    /// Swap4 filter method (byte-swapping for 32-bit aligned data).
+    pub const SWAP4_FILTER: Self = Self("SWAP4", Self::ID_SWAP4);
 
     const ENCODING_METHODS: &'static [&'static EncoderMethod] = &[
         &Self::COPY,
@@ -428,6 +460,8 @@ impl EncoderMethod {
         &Self::BCJ_RISCV_FILTER,
         &Self::DELTA_FILTER,
         &Self::BCJ2_FILTER,
+        &Self::SWAP2_FILTER,
+        &Self::SWAP4_FILTER,
     ];
 
     #[inline]

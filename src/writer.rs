@@ -2,10 +2,12 @@ mod counting_writer;
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 mod lazy_file_reader;
 mod pack_info;
+mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 mod segmented_writer;
 mod seq_reader;
 mod source_reader;
+mod streaming;
 mod unpack_info;
 
 use std::{
@@ -22,10 +24,14 @@ use crc32fast::Hasher;
 
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
+pub use self::progress::{
+    FnProgressCallback, NoopProgressCallback, ProgressCallback, ProgressInfo, ProgressResult,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::segmented_writer::{SegmentedWriter, VolumeConfig, VolumeMetadata};
 pub(crate) use self::seq_reader::SeqReader;
 pub use self::source_reader::SourceReader;
+pub use self::streaming::StreamingArchiveWriter;
 use self::{pack_info::PackInfo, unpack_info::UnpackInfo};
 use crate::{
     ArchiveEntry, AutoFinish, AutoFinisher, ByteWriter, Error,
@@ -88,6 +94,7 @@ pub struct ArchiveWriter<W: Write> {
     pack_info: PackInfo,
     unpack_info: UnpackInfo,
     encrypt_header: bool,
+    comment: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -183,6 +190,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             pack_info: Default::default(),
             unpack_info: Default::default(),
             encrypt_header: true,
+            comment: None,
         })
     }
 
@@ -203,6 +211,28 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// Whether to enable the encryption of the -header. Default is `true`.
     pub fn set_encrypt_header(&mut self, enabled: bool) {
         self.encrypt_header = enabled;
+    }
+
+    /// Sets an optional archive comment.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::*;
+    ///
+    /// let mut sz = ArchiveWriter::create("path/to/archive.7z").unwrap();
+    /// sz.set_comment("This archive was created with sevenz-rust2");
+    /// // Add files...
+    /// sz.finish().unwrap();
+    /// ```
+    pub fn set_comment(&mut self, comment: impl Into<String>) -> &mut Self {
+        self.comment = Some(comment.into());
+        self
+    }
+
+    /// Clears the archive comment.
+    pub fn clear_comment(&mut self) -> &mut Self {
+        self.comment = None;
+        self
     }
 
     /// Non-solid compression - Adds an archive `entry` with data from `reader`.
@@ -245,7 +275,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     )?;
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-                    let mut buf = [0u8; 4096];
+                    // Use 64KB buffer for better I/O performance
+                    let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
                     loop {
                         match r.read(&mut buf) {
                             Ok(n) => {
@@ -300,6 +331,151 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         Ok(self.files.last().unwrap())
     }
 
+    /// Non-solid compression with progress callback - Adds an archive `entry` with data from `reader`.
+    ///
+    /// This method is similar to `push_archive_entry`, but allows monitoring compression progress
+    /// through a callback function.
+    ///
+    /// # Arguments
+    /// * `entry` - The archive entry metadata
+    /// * `reader` - Optional reader providing the entry's data
+    /// * `progress` - Progress callback that receives updates during compression
+    /// * `progress_interval` - How often to call the progress callback (in bytes read)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::{fs::File, path::Path};
+    /// use sevenz_rust2::*;
+    ///
+    /// let mut sz = ArchiveWriter::create("path/to/dest.7z").expect("create writer ok");
+    /// let src = Path::new("path/to/source.txt");
+    /// let name = "source.txt".to_string();
+    ///
+    /// let progress_callback = FnProgressCallback::new(|info| {
+    ///     println!("Read {} bytes, wrote {} bytes", info.bytes_read, info.bytes_written);
+    ///     ProgressResult::Continue
+    /// });
+    ///
+    /// let entry = sz
+    ///     .push_archive_entry_with_progress(
+    ///         ArchiveEntry::from_path(&src, name),
+    ///         Some(File::open(src).unwrap()),
+    ///         progress_callback,
+    ///         64 * 1024, // Report every 64KB
+    ///     )
+    ///     .expect("ok");
+    /// sz.finish().expect("done");
+    /// ```
+    pub fn push_archive_entry_with_progress<R: Read, P: progress::ProgressCallback>(
+        &mut self,
+        mut entry: ArchiveEntry,
+        reader: Option<R>,
+        mut progress: P,
+        progress_interval: u64,
+    ) -> Result<&ArchiveEntry> {
+        if !entry.is_directory {
+            if let Some(mut r) = reader {
+                let mut compressed_len = 0;
+                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+
+                let mut more_sizes: Vec<Rc<Cell<usize>>> =
+                    Vec::with_capacity(self.content_methods.len() - 1);
+
+                let entry_name = entry.name().to_string();
+                let entry_index = self.files.len();
+
+                let (crc, size) = {
+                    let mut w = Self::create_writer(
+                        &self.content_methods,
+                        &mut compressed,
+                        &mut more_sizes,
+                    )?;
+                    let mut write_len = 0;
+                    let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
+                    // Use 64KB buffer for better I/O performance
+                    let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
+                    let mut total_read: u64 = 0;
+                    let mut last_progress_read: u64 = 0;
+
+                    loop {
+                        match r.read(&mut buf) {
+                            Ok(n) => {
+                                if n == 0 {
+                                    break;
+                                }
+                                w.write_all(&buf[..n]).map_err(|e| {
+                                    Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                                })?;
+                                total_read += n as u64;
+
+                                // Call progress callback at specified intervals
+                                // Note: bytes_written is 0 during compression because final
+                                // compressed size is unknown until encoding completes
+                                if total_read - last_progress_read >= progress_interval {
+                                    let info = progress::ProgressInfo::new(total_read, 0)
+                                        .with_entry(&entry_name)
+                                        .with_index(entry_index);
+                                    
+                                    if progress.on_progress(&info) == progress::ProgressResult::Cancel {
+                                        return Err(Error::other("Operation cancelled by progress callback"));
+                                    }
+                                    last_progress_read = total_read;
+                                }
+                            }
+                            Err(e) => {
+                                return Err(Error::io_msg(
+                                    e,
+                                    format!("Encode entry:{}", entry.name()),
+                                ));
+                            }
+                        }
+                    }
+
+                    w.flush()
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+                    w.write(&[])
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+
+                    (w.crc_value(), write_len)
+                };
+
+                let compressed_crc = compressed.crc_value();
+
+                // Final progress update with actual compressed size
+                // (Cancellation ignored at this point since compression is complete)
+                let info = progress::ProgressInfo::new(size as u64, compressed_len as u64)
+                    .with_entry(&entry_name)
+                    .with_index(entry_index);
+                let _ = progress.on_progress(&info);
+
+                entry.has_stream = true;
+                entry.size = size as u64;
+                entry.crc = crc as u64;
+                entry.has_crc = true;
+                entry.compressed_crc = compressed_crc as u64;
+                entry.compressed_size = compressed_len as u64;
+                self.pack_info
+                    .add_stream(compressed_len as u64, compressed_crc);
+
+                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
+                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
+                sizes.push(size as u64);
+
+                self.unpack_info
+                    .add(self.content_methods.clone(), sizes, crc);
+
+                self.files.push(entry);
+                return Ok(self.files.last().unwrap());
+            }
+        }
+        entry.has_stream = false;
+        entry.size = 0;
+        entry.compressed_size = 0;
+        entry.has_crc = false;
+        self.files.push(entry);
+        Ok(self.files.last().unwrap())
+    }
+
     /// Solid compression - packs `entries` into one pack.
     ///
     /// # Panics
@@ -321,7 +497,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             let mut w = Self::create_writer(content_methods, &mut compressed, &mut more_sizes)?;
             let mut write_len = 0;
             let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-            let mut buf = [0u8; 4096];
+            // Use 64KB buffer for better I/O performance
+            let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
 
             fn entries_names(entries: &[ArchiveEntry]) -> String {
                 let mut names = String::with_capacity(512);
@@ -458,9 +635,30 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
     fn write_header<H: Write>(&mut self, header: &mut H) -> std::io::Result<()> {
         header.write_u8(K_HEADER)?;
+        // Write archive properties if there's a comment
+        if self.comment.is_some() {
+            self.write_archive_properties(header)?;
+        }
         header.write_u8(K_MAIN_STREAMS_INFO)?;
         self.write_streams_info(header)?;
         self.write_files_info(header)?;
+        header.write_u8(K_END)?;
+        Ok(())
+    }
+
+    fn write_archive_properties<H: Write>(&self, header: &mut H) -> std::io::Result<()> {
+        header.write_u8(K_ARCHIVE_PROPERTIES)?;
+        if let Some(comment) = &self.comment {
+            // Write comment property
+            header.write_u8(K_COMMENT)?;
+
+            // Convert comment to UTF-16LE with null terminator
+            let utf16: Vec<u16> = comment.encode_utf16().chain(std::iter::once(0)).collect();
+            let bytes: Vec<u8> = utf16.iter().flat_map(|&c| c.to_le_bytes()).collect();
+
+            write_u64(header, bytes.len() as u64)?;
+            header.write_all(&bytes)?;
+        }
         header.write_u8(K_END)?;
         Ok(())
     }

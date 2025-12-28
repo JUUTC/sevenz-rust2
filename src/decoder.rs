@@ -4,6 +4,8 @@ use std::{io, io::Read};
 use bzip2::read::BzDecoder;
 #[cfg(feature = "deflate")]
 use flate2::bufread::DeflateDecoder;
+#[cfg(feature = "deflate64")]
+use deflate64::Deflate64Decoder;
 use lzma_rust2::{
     Lzma2Reader, Lzma2ReaderMt, LzmaReader,
     filter::{bcj::BcjReader, delta::DeltaReader},
@@ -18,6 +20,7 @@ use ppmd_rust::{
 use crate::codec::brotli::BrotliDecoder;
 #[cfg(feature = "lz4")]
 use crate::codec::lz4::Lz4Decoder;
+use crate::codec::swap::{Swap2Reader, Swap4Reader};
 #[cfg(feature = "aes256")]
 use crate::encryption::Aes256Sha256Decoder;
 use crate::{ByteReader, Password, archive::EncoderMethod, block::Coder, error::Error};
@@ -31,12 +34,16 @@ pub enum Decoder<R: Read> {
     Ppmd(Box<Ppmd7Decoder<R>>),
     Bcj(BcjReader<R>),
     Delta(DeltaReader<R>),
+    Swap2(Swap2Reader<R>),
+    Swap4(Swap4Reader<R>),
     #[cfg(feature = "brotli")]
     Brotli(Box<BrotliDecoder<R>>),
     #[cfg(feature = "bzip2")]
     Bzip2(BzDecoder<R>),
     #[cfg(feature = "deflate")]
     Deflate(DeflateDecoder<std::io::BufReader<R>>),
+    #[cfg(feature = "deflate64")]
+    Deflate64(Deflate64Decoder<std::io::BufReader<R>>),
     #[cfg(feature = "lz4")]
     Lz4(Lz4Decoder<R>),
     #[cfg(feature = "zstd")]
@@ -56,12 +63,16 @@ impl<R: Read> Read for Decoder<R> {
             Decoder::Ppmd(r) => r.read(buf),
             Decoder::Bcj(r) => r.read(buf),
             Decoder::Delta(r) => r.read(buf),
+            Decoder::Swap2(r) => r.read(buf),
+            Decoder::Swap4(r) => r.read(buf),
             #[cfg(feature = "brotli")]
             Decoder::Brotli(r) => r.read(buf),
             #[cfg(feature = "bzip2")]
             Decoder::Bzip2(r) => r.read(buf),
             #[cfg(feature = "deflate")]
             Decoder::Deflate(r) => r.read(buf),
+            #[cfg(feature = "deflate64")]
+            Decoder::Deflate64(r) => r.read(buf),
             #[cfg(feature = "lz4")]
             Decoder::Lz4(r) => r.read(buf),
             #[cfg(feature = "zstd")]
@@ -143,6 +154,12 @@ pub fn add_decoder<I: Read>(
             let de = DeflateDecoder::new(buf_read);
             Ok(Decoder::Deflate(de))
         }
+        #[cfg(feature = "deflate64")]
+        EncoderMethod::ID_DEFLATE64 => {
+            let buf_read = std::io::BufReader::new(input);
+            let de = Deflate64Decoder::with_buffer(buf_read);
+            Ok(Decoder::Deflate64(de))
+        }
         #[cfg(feature = "lz4")]
         EncoderMethod::ID_LZ4 => {
             let de = Lz4Decoder::new(input)?;
@@ -193,6 +210,14 @@ pub fn add_decoder<I: Read>(
             };
             let de = DeltaReader::new(input, d as usize);
             Ok(Decoder::Delta(de))
+        }
+        EncoderMethod::ID_SWAP2 => {
+            let de = Swap2Reader::new(input);
+            Ok(Decoder::Swap2(de))
+        }
+        EncoderMethod::ID_SWAP4 => {
+            let de = Swap4Reader::new(input);
+            Ok(Decoder::Swap4(de))
         }
         #[cfg(feature = "aes256")]
         EncoderMethod::ID_AES256_SHA256 => {

@@ -13,6 +13,7 @@
 //! | BROTLI (*)     | ✓             | ✓           |
 //! | BZIP2          | ✓             | ✓           |
 //! | DEFLATE (*)    | ✓             | ✓           |
+//! | DEFLATE64 (*)  | ✓             |             |
 //! | PPMD           | ✓             | ✓           |
 //! | LZ4 (*)        | ✓             | ✓           |
 //! | ZSTD (*)       | ✓             | ✓           |
@@ -31,6 +32,20 @@
 //! | BCJ IA64      | ✓             | ✓           |
 //! | BCJ2          | ✓             |             |
 //! | DELTA         | ✓             | ✓           |
+//! | SWAP2         | ✓             | ✓           |
+//! | SWAP4         | ✓             | ✓           |
+//!
+//! ## Optional Features
+//!
+//! | Feature   | Description                                   |
+//! |-----------|-----------------------------------------------|
+//! | brotli    | Brotli compression codec                      |
+//! | deflate   | Deflate compression codec                     |
+//! | deflate64 | Deflate64 decompression codec                 |
+//! | lz4       | LZ4 compression codec                         |
+//! | zstd      | Zstandard compression codec                   |
+//! | mmap      | Memory-mapped file I/O for better performance |
+//! | tokio     | Async/await support with tokio                |
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
@@ -58,6 +73,13 @@ pub(crate) mod decoder;
 mod time;
 #[cfg(feature = "util")]
 mod util;
+#[cfg(feature = "tokio")]
+pub mod async_support;
+#[cfg(feature = "mmap")]
+pub mod mmap;
+
+/// Performance tuning utilities.
+pub mod perf;
 
 use std::{
     io::{Read, Write},
@@ -68,7 +90,7 @@ pub use archive::*;
 pub use block::*;
 pub use encryption::Password;
 pub use error::Error;
-pub use reader::{ArchiveReader, BlockDecoder};
+pub use reader::{ArchiveReader, BlockDecoder, TestResult};
 pub use time::NtTime;
 #[cfg(all(feature = "compress", feature = "util", not(target_arch = "wasm32")))]
 pub use util::compress::*;

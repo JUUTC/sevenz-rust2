@@ -23,8 +23,11 @@ brotli = ["dep:brotli"]
 bzip2 = ["dep:bzip2"]
 compress = ["lzma-rust2/encoder"]
 deflate = ["dep:flate2"]
+deflate64 = ["dep:deflate64"]
 lz4 = ["dep:lz4_flex"]
+mmap = ["dep:memmap2"]
 ppmd = ["dep:ppmd-rust"]
+tokio = ["dep:tokio"]
 util = []
 zstd = ["dep:zstd"]
 
@@ -34,13 +37,16 @@ brotli = { version = ">= 7, < 9", default-features = false, optional = true, fea
 bzip2 = { version = "0.6", optional = true }
 cbc = { version = "0.1", optional = true }
 crc32fast = "1"
+deflate64 = { version = "0.1", optional = true }
 flate2 = { version = "1", optional = true, features = ["zlib-rs"] }
 getrandom = { version = "0.3", optional = true }
 lzma-rust2 = { version = "0.15", default-features = false, features = ["std", "optimization"] }
+memmap2 = { version = "0.9", optional = true }
 ppmd-rust = { version = "1", optional = true }
 lz4_flex = { version = "0.12", optional = true }
 nt-time = { version = "0.13", optional = true }
 sha2 = { version = "0.10", optional = true }
+tokio = { version = "1.48", optional = true, features = ["io-util", "fs", "rt"] }
 zstd = { version = "0.13", optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -50,6 +56,7 @@ wasm-bindgen = "0.2"
 [dev-dependencies]
 rand = { version = "0.9" }
 tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [[example]]
 name = "advance"
