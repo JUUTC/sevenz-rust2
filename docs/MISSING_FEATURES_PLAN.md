@@ -177,7 +177,7 @@ The seek operations are minimal:
 | | PPMD | ✅ | ✅ | Optional feature |
 | | BZIP2 | ✅ | ✅ | |
 | | DEFLATE | ✅ | ✅ | Optional feature |
-| | DEFLATE64 | ❌ | ❌ | ID defined, no implementation |
+| | DEFLATE64 | ✅ | ❌ | Decompression only (optional feature) |
 | | BROTLI | ✅ | ✅ | Optional feature |
 | | LZ4 | ✅ | ✅ | Optional feature |
 | | LZS | ❌ | ❌ | ID defined, no implementation |
@@ -434,7 +434,7 @@ archive.set_content_methods(vec![
 9. [x] kStartPos support (1 day) - **COMPLETED**
 
 ### Phase 4 (Extended Codecs)
-10. Deflate64 (2-3 days if library available)
+10. [x] Deflate64 (2-3 days if library available) - **COMPLETED** (decompression only)
 11. LZS codec (2-3 days)
 12. LIZARD codec (2-3 days)
 
