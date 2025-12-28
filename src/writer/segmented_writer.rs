@@ -144,6 +144,11 @@ impl SegmentedWriter {
 }
 
 impl Write for SegmentedWriter {
+    /// Writes data to the segmented output.
+    ///
+    /// This method may perform a partial write when approaching volume boundaries.
+    /// Callers should use `write_all()` to ensure all data is written, or handle
+    /// partial writes appropriately by calling `write()` again with the remaining data.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let remaining_in_volume = self.config.volume_size.saturating_sub(self.current_volume_bytes);
 
@@ -209,10 +214,15 @@ impl Seek for SegmentedWriter {
                 };
                 self.seek(SeekFrom::Start(new_abs))
             }
-            SeekFrom::End(_) => {
-                // Seek from end - seek to end of last written data
+            SeekFrom::End(offset) => {
+                // Seek from end - calculate position as end_pos + offset
                 let end_pos = self.total_bytes;
-                self.seek(SeekFrom::Start(end_pos))
+                let new_pos = if offset >= 0 {
+                    end_pos.saturating_add(offset as u64)
+                } else {
+                    end_pos.saturating_sub((-offset) as u64)
+                };
+                self.seek(SeekFrom::Start(new_pos))
             }
         }
     }
@@ -321,5 +331,59 @@ mod tests {
         // Seek back to position 7
         writer.seek(SeekFrom::Start(7)).unwrap();
         assert_eq!(writer.stream_position().unwrap(), 7);
+    }
+
+    #[test]
+    fn test_seek_across_volumes() {
+        let temp_dir = tempdir().unwrap();
+        let base_path = temp_dir.path().join("test");
+
+        let config = VolumeConfig::new(&base_path, 10); // 10 bytes per volume
+        let mut writer = SegmentedWriter::new(config).unwrap();
+
+        // Write 30 bytes across 3 volumes
+        writer.write_all(b"0123456789ABCDEFGHIJ0123456789").unwrap();
+        assert_eq!(writer.current_volume(), 3);
+        assert_eq!(writer.total_bytes(), 30);
+
+        // Seek back to position 0 (first volume)
+        writer.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(writer.current_volume(), 1);
+        assert_eq!(writer.stream_position().unwrap(), 0);
+
+        // Write new data at position 0
+        writer.write_all(b"XX").unwrap();
+
+        // Seek to position 15 (second volume)
+        writer.seek(SeekFrom::Start(15)).unwrap();
+        assert_eq!(writer.current_volume(), 2);
+        assert_eq!(writer.stream_position().unwrap(), 15);
+
+        let metadata = writer.finish().unwrap();
+
+        // Verify first volume was modified
+        let mut file1 = File::open(&metadata.volume_paths[0]).unwrap();
+        let mut content1 = Vec::new();
+        file1.read_to_end(&mut content1).unwrap();
+        assert_eq!(content1, b"XX23456789"); // First two bytes replaced
+    }
+
+    #[test]
+    fn test_seek_from_end() {
+        let temp_dir = tempdir().unwrap();
+        let base_path = temp_dir.path().join("test");
+
+        let config = VolumeConfig::new(&base_path, 1024);
+        let mut writer = SegmentedWriter::new(config).unwrap();
+
+        writer.write_all(b"Hello, World!").unwrap();
+
+        // Seek to end - 5 bytes
+        writer.seek(SeekFrom::End(-5)).unwrap();
+        assert_eq!(writer.stream_position().unwrap(), 8);
+
+        // Seek to end
+        writer.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(writer.stream_position().unwrap(), 13);
     }
 }
