@@ -60,6 +60,8 @@ pub(crate) mod decoder;
 mod time;
 #[cfg(feature = "util")]
 mod util;
+#[cfg(feature = "tokio")]
+pub mod async_support;
 
 use std::{
     io::{Read, Write},

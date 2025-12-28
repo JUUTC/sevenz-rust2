@@ -423,11 +423,11 @@ archive.set_content_methods(vec![
 2. [x] Document existing streaming capabilities
 3. [x] Add `StreamingArchiveWriter` for non-seekable outputs (2-3 days) - **COMPLETED**
 4. [x] Add progress callbacks for stream monitoring (1 day) - **COMPLETED**
-5. Add async feature flag with tokio support (3-5 days)
+5. [x] Add async feature flag with tokio support (3-5 days) - **COMPLETED**
 
 ### Phase 2 (Filters)
 6. [x] Swap2/Swap4 filters (1-2 days) - **COMPLETED**
-7. BCJ2 compression (3-5 days)
+7. BCJ2 compression (3-5 days) - *Requires changes to lzma-rust2 crate*
 
 ### Phase 3 (Extended Features)
 8. [x] Archive comments (1 day) - **COMPLETED**
