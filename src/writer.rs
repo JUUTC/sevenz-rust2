@@ -2,6 +2,8 @@ mod counting_writer;
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 mod lazy_file_reader;
 mod pack_info;
+#[cfg(not(target_arch = "wasm32"))]
+mod segmented_writer;
 mod seq_reader;
 mod source_reader;
 mod unpack_info;
@@ -21,6 +23,8 @@ use crc32fast::Hasher;
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
 pub(crate) use self::seq_reader::SeqReader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::segmented_writer::{SegmentedWriter, VolumeConfig, VolumeMetadata};
 pub use self::source_reader::SourceReader;
 use self::{pack_info::PackInfo, unpack_info::UnpackInfo};
 use crate::{
@@ -93,6 +97,77 @@ impl ArchiveWriter<File> {
         let file = File::create(path.as_ref())
             .map_err(|e| Error::file_open(e, path.as_ref().to_string_lossy().to_string()))?;
         Self::new(file)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ArchiveWriter<SegmentedWriter> {
+    /// Creates a multi-volume archive writer with the specified volume configuration.
+    ///
+    /// Multi-volume archives are split across multiple files, each with a maximum size
+    /// defined by the volume configuration. Files are named with extensions `.7z.001`,
+    /// `.7z.002`, etc.
+    ///
+    /// # Arguments
+    /// * `config` - The volume configuration specifying size limits and base path.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::*;
+    ///
+    /// // Create a multi-volume archive with 10MB volumes
+    /// let config = VolumeConfig::new("path/to/archive", 10 * 1024 * 1024);
+    /// let mut writer = ArchiveWriter::create_multi_volume(config).unwrap();
+    ///
+    /// // Add files as normal
+    /// // writer.push_archive_entry(...);
+    ///
+    /// // Finish returns metadata about created volumes
+    /// let metadata = writer.finish_multi_volume().unwrap();
+    /// println!("Created {} volumes", metadata.volume_count);
+    /// ```
+    pub fn create_multi_volume(config: VolumeConfig) -> Result<Self> {
+        let writer = SegmentedWriter::new(config)
+            .map_err(|e| Error::io_msg(e, "Failed to create segmented writer"))?;
+        Self::new(writer)
+    }
+
+    /// Finishes the multi-volume compression and returns metadata about created volumes.
+    ///
+    /// This method writes the final header, patches the start header in volume 1,
+    /// and returns information about all created volume files.
+    pub fn finish_multi_volume(mut self) -> std::io::Result<VolumeMetadata> {
+        let mut header: Vec<u8> = Vec::with_capacity(64 * 1024);
+        self.write_encoded_header(&mut header)?;
+        let header_pos = self.output.stream_position()?;
+        self.output.write_all(&header)?;
+        let crc32 = crc32fast::hash(&header);
+        let mut hh = [0u8; SIGNATURE_HEADER_SIZE as usize];
+        {
+            let mut hhw = hh.as_mut_slice();
+            // sig
+            hhw.write_all(SEVEN_Z_SIGNATURE)?;
+            // version
+            hhw.write_u8(0)?;
+            hhw.write_u8(4)?;
+            // placeholder for crc: index = 8
+            hhw.write_u32(0)?;
+
+            // start header
+            hhw.write_u64(header_pos - SIGNATURE_HEADER_SIZE)?;
+            hhw.write_u64(0xFFFFFFFF & header.len() as u64)?;
+            hhw.write_u32(crc32)?;
+        }
+        let crc32 = crc32fast::hash(&hh[12..]);
+        hh[8..12].copy_from_slice(&crc32.to_le_bytes());
+
+        // Seek back to the start and write the header
+        self.output.seek(std::io::SeekFrom::Start(0))?;
+        self.output.write_all(&hh)?;
+        self.output.flush()?;
+
+        // Finish the segmented writer and return metadata
+        self.output.finish()
     }
 }
 

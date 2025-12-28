@@ -73,6 +73,26 @@ sevenz_rust2::compress_to_path_encrypted("examples/data/sample", "examples/data/
 
 ### Advanced Usage
 
+#### Multi-Volume Archives
+
+Create multi-volume archives that split across multiple files when they exceed a size limit:
+
+```rust
+use sevenz_rust2::*;
+
+// Create a multi-volume archive with 10MB volume size limit
+let config = VolumeConfig::new("path/to/archive", 10 * 1024 * 1024);
+let mut writer = ArchiveWriter::create_multi_volume(config).expect("create writer ok");
+
+// Add files as normal
+writer.push_source_path("path/to/compress", |_| true).expect("pack ok");
+
+// Finish and get metadata about created volumes
+let metadata = writer.finish_multi_volume().expect("compress ok");
+println!("Created {} volumes", metadata.volume_count);
+// Files created: archive.7z.001, archive.7z.002, etc.
+```
+
 #### Solid compression
 
 Solid archives can in theory provide better compression rates, but decompressing a file needs all previous data to also
