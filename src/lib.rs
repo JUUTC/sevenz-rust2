@@ -63,6 +63,9 @@ mod util;
 #[cfg(feature = "tokio")]
 pub mod async_support;
 
+/// Performance tuning utilities.
+pub mod perf;
+
 use std::{
     io::{Read, Write},
     ops::{Deref, DerefMut},

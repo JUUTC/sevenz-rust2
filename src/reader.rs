@@ -1227,6 +1227,34 @@ impl<R: Read + Seek> ArchiveReader<R> {
         &self.archive
     }
 
+    /// Returns true if this archive can benefit from parallel file decompression.
+    ///
+    /// Non-solid archives have blocks that can be decompressed independently
+    /// in parallel. Solid archives must be decompressed sequentially because
+    /// files depend on previous data within the same block.
+    ///
+    /// Use this to decide whether to use multi-threaded decompression strategies.
+    #[inline]
+    pub fn supports_parallel_decompression(&self) -> bool {
+        !self.archive.is_solid
+    }
+
+    /// Returns the number of blocks (compression units) in the archive.
+    ///
+    /// Each block is an independent compression unit that can be decompressed
+    /// separately. Note that a single block may contain multiple files.
+    /// For solid archives, this is typically 1 (all files in one block).
+    #[inline]
+    pub fn block_count(&self) -> usize {
+        self.archive.blocks.len()
+    }
+
+    /// Returns an iterator over the entries (files/directories) in the archive.
+    #[inline]
+    pub fn entries(&self) -> impl Iterator<Item = &ArchiveEntry> {
+        self.archive.files.iter()
+    }
+
     fn build_decode_stack<'r>(
         source: &'r mut R,
         archive: &Archive,

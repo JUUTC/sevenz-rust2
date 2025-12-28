@@ -387,8 +387,24 @@ archive.set_content_methods(vec![
 **Potential:** For non-solid archives, each block is independent and can be decompressed in parallel.
 
 **Implementation:**
-1. Add parallel iteration API for blocks
-2. Use rayon or thread pool for parallel decompression
+1. ✅ Added `supports_parallel_decompression()` method to `ArchiveReader`
+2. ✅ Added `block_count()` and `entries()` helper methods
+3. Users can implement parallel decompression using rayon or thread pools
+
+**Example:**
+```rust
+use sevenz_rust2::*;
+
+let reader = ArchiveReader::open("archive.7z", Password::empty())?;
+
+if reader.supports_parallel_decompression() {
+    // Archive has independent blocks - can process in parallel
+    println!("Archive supports parallel decompression with {} blocks", reader.block_count());
+} else {
+    // Solid archive - must process sequentially
+    println!("Solid archive - sequential processing required");
+}
+```
 
 ---
 
@@ -404,15 +420,33 @@ archive.set_content_methods(vec![
 
 ---
 
-### O3: Larger Internal Buffers
+### O3: Larger Internal Buffers ✅ COMPLETED
 
-**Current State:** 4KB internal buffer for stream processing.
+**Current State:** 64KB internal buffer for stream processing (improved from 4KB).
 
-**Potential:** Larger buffers (64KB-256KB) can improve throughput for network/disk I/O.
+**What was implemented:**
+- New `perf` module with configurable buffer sizes
+- Default buffer size increased from 4KB to 64KB
+- Predefined constants: `SMALL_BUFFER_SIZE` (4KB), `DEFAULT_BUFFER_SIZE` (64KB), `LARGE_BUFFER_SIZE` (256KB), `XLARGE_BUFFER_SIZE` (1MB)
+- `BufferConfig` for customizing buffer sizes
+- Helper functions `buffered_copy()` and `buffered_copy_with_crc()`
 
-**Implementation:**
-1. Make buffer size configurable
-2. Use adaptive buffering based on source type
+**Usage:**
+```rust
+use sevenz_rust2::perf::{BufferConfig, DEFAULT_BUFFER_SIZE, LARGE_BUFFER_SIZE};
+
+// Use default configuration (64KB buffers)
+let default_config = BufferConfig::default();
+
+// Use large buffers for SSDs/fast networks
+let fast_io_config = BufferConfig::high_bandwidth(); // 256KB
+
+// Use small buffers for memory-constrained environments
+let low_mem_config = BufferConfig::low_memory(); // 4KB
+
+// Custom buffer size
+let custom_config = BufferConfig::new(128 * 1024); // 128KB
+```
 
 ---
 
@@ -443,8 +477,9 @@ archive.set_content_methods(vec![
 14. Additional streams (3-5 days)
 
 ### Phase 6 (Optimizations)
-15. Parallel decompression API
-16. Memory-mapped file support
+15. [x] Larger internal buffers (64KB default) - **COMPLETED**
+16. [x] Parallel decompression detection API - **COMPLETED**
+17. Memory-mapped file support
 
 ---
 

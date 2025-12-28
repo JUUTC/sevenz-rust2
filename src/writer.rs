@@ -275,7 +275,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     )?;
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-                    let mut buf = [0u8; 4096];
+                    // Use 64KB buffer for better I/O performance
+                    let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
                     loop {
                         match r.read(&mut buf) {
                             Ok(n) => {
@@ -391,7 +392,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     )?;
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-                    let mut buf = [0u8; 4096];
+                    // Use 64KB buffer for better I/O performance
+                    let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
                     let mut total_read: u64 = 0;
                     let mut last_progress_read: u64 = 0;
 
@@ -495,7 +497,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             let mut w = Self::create_writer(content_methods, &mut compressed, &mut more_sizes)?;
             let mut write_len = 0;
             let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-            let mut buf = [0u8; 4096];
+            // Use 64KB buffer for better I/O performance
+            let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
 
             fn entries_names(entries: &[ArchiveEntry]) -> String {
                 let mut names = String::with_capacity(512);
