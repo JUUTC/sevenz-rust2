@@ -44,7 +44,7 @@ impl<R: Read> Read for Swap2Reader<R> {
             pos += 1;
         }
 
-        // Read pairs and swap them - use larger reads for better performance
+        // Read pairs and swap them
         while pos < buf.len() {
             let mut pair = [0u8; 2];
             let n = self.inner.read(&mut pair)?;
@@ -179,10 +179,9 @@ impl<R: Read> Read for Swap4Reader<R> {
 
         let mut pos = 0;
 
-        // First, emit any pending bytes from previous read
+        // First, emit any pending bytes from previous read (LIFO order)
         while self.pending_len > 0 && pos < buf.len() {
-            let pending_start_idx = 3 - self.pending_len + 1;
-            buf[pos] = self.pending[pending_start_idx - 1];
+            buf[pos] = self.pending[3 - self.pending_len];
             self.pending_len -= 1;
             pos += 1;
         }
