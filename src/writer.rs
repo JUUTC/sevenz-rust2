@@ -7,6 +7,7 @@ mod progress;
 mod segmented_writer;
 mod seq_reader;
 mod source_reader;
+mod streaming;
 mod unpack_info;
 
 use std::{
@@ -30,6 +31,7 @@ pub use self::progress::{
 pub use self::segmented_writer::{SegmentedWriter, VolumeConfig, VolumeMetadata};
 pub(crate) use self::seq_reader::SeqReader;
 pub use self::source_reader::SourceReader;
+pub use self::streaming::StreamingArchiveWriter;
 use self::{pack_info::PackInfo, unpack_info::UnpackInfo};
 use crate::{
     ArchiveEntry, AutoFinish, AutoFinisher, ByteWriter, Error,
