@@ -51,7 +51,7 @@
 //! - Falls back gracefully on platforms where mmap is unavailable
 
 use std::fs::File;
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use memmap2::Mmap;
@@ -61,7 +61,7 @@ use crate::{Archive, ArchiveEntry, ArchiveReader, Error, Password};
 /// A wrapper that provides [`Read`] and [`Seek`] over a memory-mapped file.
 pub struct MmapReader {
     mmap: Mmap,
-    cursor: Cursor<Vec<u8>>,
+    position: u64,
 }
 
 impl MmapReader {
@@ -75,11 +75,9 @@ impl MmapReader {
         // This is a common assumption for archive reading.
         let mmap = unsafe { Mmap::map(file)? };
 
-        // We create a cursor over the mmap data for easy seeking
-        // Note: This doesn't copy the data, the cursor just tracks position
         Ok(Self {
             mmap,
-            cursor: Cursor::new(Vec::new()),
+            position: 0,
         })
     }
 
@@ -104,7 +102,7 @@ impl MmapReader {
 
 impl Read for MmapReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let pos = self.cursor.position() as usize;
+        let pos = self.position as usize;
         if pos >= self.mmap.len() {
             return Ok(0);
         }
@@ -112,7 +110,7 @@ impl Read for MmapReader {
         let available = self.mmap.len() - pos;
         let to_read = buf.len().min(available);
         buf[..to_read].copy_from_slice(&self.mmap[pos..pos + to_read]);
-        self.cursor.set_position((pos + to_read) as u64);
+        self.position = (pos + to_read) as u64;
         Ok(to_read)
     }
 }
@@ -122,7 +120,7 @@ impl Seek for MmapReader {
         let new_pos = match pos {
             SeekFrom::Start(offset) => offset as i64,
             SeekFrom::End(offset) => self.mmap.len() as i64 + offset,
-            SeekFrom::Current(offset) => self.cursor.position() as i64 + offset,
+            SeekFrom::Current(offset) => self.position as i64 + offset,
         };
 
         if new_pos < 0 {
@@ -133,7 +131,7 @@ impl Seek for MmapReader {
         }
 
         let new_pos = new_pos as u64;
-        self.cursor.set_position(new_pos);
+        self.position = new_pos;
         Ok(new_pos)
     }
 }
