@@ -31,8 +31,22 @@ pub(crate) const K_M_TIME: u8 = 0x14;
 pub(crate) const K_WIN_ATTRIBUTES: u8 = 0x15;
 
 /// Archive comment constant (0x16).
+///
+/// # 7-Zip Specification
+///
+/// Comments are stored in the ArchiveProperties section as UTF-16LE text.
+/// Property ID 0x16 followed by size and UTF-16LE encoded string.
+/// This matches the 7-Zip.org implementation exactly.
 pub(crate) const K_COMMENT: u8 = 0x16;
 pub(crate) const K_ENCODED_HEADER: u8 = 0x17;
+
+/// Start position for sparse files (0x18).
+///
+/// # 7-Zip Specification
+///
+/// The kStartPos property specifies the starting position within the
+/// uncompressed data for sparse file support. This is rarely used
+/// but required for full compatibility with archives created by 7-Zip.
 pub(crate) const K_START_POS: u8 = 0x18;
 pub(crate) const K_DUMMY: u8 = 0x19;
 

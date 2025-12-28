@@ -557,6 +557,7 @@ fn test_archive_with_comment_integrity() {
 #[test]
 fn test_existing_archive_integrity() {
     use std::fs::File;
+    use sevenz_rust2::{ArchiveReader, Password};
 
     // Test all .7z files in the resources directory
     let dir = std::fs::read_dir("tests/resources").unwrap();

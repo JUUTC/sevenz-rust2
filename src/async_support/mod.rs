@@ -3,6 +3,20 @@
 //! This module provides async-compatible wrappers for reading and writing 7z archives.
 //! Enable with the `tokio` feature flag.
 //!
+//! # Architecture
+//!
+//! The 7z compression/decompression is inherently synchronous (using sync Read/Write traits).
+//! This module provides async wrappers that:
+//!
+//! - Use `tokio::task::spawn_blocking` for heavy I/O operations
+//! - Provide `AsyncReadBridge`/`AsyncWriteBridge` for bridging async streams (with caveats)
+//!
+//! # Performance Considerations
+//!
+//! - For large files, `spawn_blocking` is used to avoid blocking the async runtime
+//! - The bridge types (`AsyncReadBridge`, `AsyncWriteBridge`) call `block_on` internally,
+//!   which should only be used carefully within a tokio context
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -145,6 +159,11 @@ impl AsyncArchiveWriter {
     ///
     /// * `name` - Name of the entry in the archive
     /// * `reader` - Async reader providing the data
+    ///
+    /// # Note
+    ///
+    /// This method buffers all data from the async reader before compression.
+    /// For very large files, consider writing to a temp file and using `add_file`.
     pub async fn add_entry_from_async_reader<R: AsyncRead + Unpin>(
         &mut self,
         name: &str,
@@ -186,6 +205,15 @@ impl AsyncArchiveWriter {
 ///
 /// This should only be used within a tokio runtime context. Using it outside
 /// a runtime will panic.
+///
+/// # Performance Warning
+///
+/// This bridge calls `block_on` for each read operation, which can cause
+/// performance issues if the async reader has high latency or if used in
+/// a context where blocking is problematic. For production use, consider:
+///
+/// - Pre-reading all data with `read_to_end().await` before compression
+/// - Using `spawn_blocking` to run the entire compression on a blocking thread
 pub struct AsyncReadBridge<R> {
     inner: R,
     runtime_handle: tokio::runtime::Handle,

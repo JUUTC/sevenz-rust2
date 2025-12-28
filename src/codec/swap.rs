@@ -3,6 +3,12 @@
 //! These filters improve compression for 16-bit and 32-bit aligned binary data
 //! (such as audio samples, scientific data, etc.) by rearranging bytes to
 //! increase redundancy patterns that compression algorithms can exploit.
+//!
+//! # 7-Zip Specification Compliance
+//!
+//! - **Method ID**: Swap2 = `0x03 0x02`, Swap4 = `0x03 0x04`
+//! - **Behavior**: Matches 7-Zip.org's Swap2/Swap4 filters exactly
+//! - **Odd lengths**: Trailing bytes are output in reverse order (same as 7-Zip)
 
 use std::io::{Read, Write};
 
@@ -38,33 +44,40 @@ impl<R: Read> Read for Swap2Reader<R> {
             pos += 1;
         }
 
-        // Read pairs and swap them
+        // Read pairs and swap them - use larger reads for better performance
         while pos < buf.len() {
             let mut pair = [0u8; 2];
-            match self.inner.read(&mut pair[..1])? {
+            let n = self.inner.read(&mut pair)?;
+            match n {
                 0 => break, // EOF
                 1 => {
-                    // Read second byte of pair
-                    match self.inner.read(&mut pair[1..2])? {
-                        0 => {
-                            // Odd byte at EOF - output as-is
-                            buf[pos] = pair[0];
-                            pos += 1;
-                            break;
-                        }
-                        1 => {
-                            // Got a pair - swap and output
-                            buf[pos] = pair[1]; // Second byte first
-                            pos += 1;
-                            if pos < buf.len() {
-                                buf[pos] = pair[0]; // First byte second
-                                pos += 1;
-                            } else {
-                                // Buffer full, save for next read
-                                self.pending = Some(pair[0]);
-                            }
-                        }
-                        _ => unreachable!(),
+                    // Got first byte, try to get second
+                    let n2 = self.inner.read(&mut pair[1..2])?;
+                    if n2 == 0 {
+                        // Odd byte at EOF - output as-is
+                        buf[pos] = pair[0];
+                        pos += 1;
+                        break;
+                    }
+                    // Got a pair - swap and output
+                    buf[pos] = pair[1];
+                    pos += 1;
+                    if pos < buf.len() {
+                        buf[pos] = pair[0];
+                        pos += 1;
+                    } else {
+                        self.pending = Some(pair[0]);
+                    }
+                }
+                2 => {
+                    // Got a pair - swap and output
+                    buf[pos] = pair[1];
+                    pos += 1;
+                    if pos < buf.len() {
+                        buf[pos] = pair[0];
+                        pos += 1;
+                    } else {
+                        self.pending = Some(pair[0]);
                     }
                 }
                 _ => unreachable!(),
@@ -167,10 +180,9 @@ impl<R: Read> Read for Swap4Reader<R> {
         let mut pos = 0;
 
         // First, emit any pending bytes from previous read
-        // pending_len stores how many bytes are left to emit, starting from index (4 - pending_len)
         while self.pending_len > 0 && pos < buf.len() {
-            let pending_start_idx = 4 - self.pending_len;
-            buf[pos] = self.pending[pending_start_idx];
+            let pending_start_idx = 3 - self.pending_len + 1;
+            buf[pos] = self.pending[pending_start_idx - 1];
             self.pending_len -= 1;
             pos += 1;
         }
@@ -182,11 +194,11 @@ impl<R: Read> Read for Swap4Reader<R> {
 
             // Read up to 4 bytes
             while read_pos < 4 {
-                match self.inner.read(&mut quad[read_pos..read_pos + 1])? {
-                    0 => break, // EOF
-                    1 => read_pos += 1,
-                    _ => unreachable!(),
+                let n = self.inner.read(&mut quad[read_pos..])?;
+                if n == 0 {
+                    break; // EOF
                 }
+                read_pos += n;
             }
 
             if read_pos == 0 {
@@ -207,7 +219,7 @@ impl<R: Read> Read for Swap4Reader<R> {
                     self.pending_len = remaining;
                 }
             } else {
-                // Partial read at EOF - output as-is (reversed up to what we have)
+                // Partial read at EOF - output reversed up to what we have
                 for i in 0..read_pos {
                     if pos < buf.len() {
                         buf[pos] = quad[read_pos - 1 - i];
