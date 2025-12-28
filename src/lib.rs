@@ -31,6 +31,8 @@
 //! | BCJ IA64      | ✓             | ✓           |
 //! | BCJ2          | ✓             |             |
 //! | DELTA         | ✓             | ✓           |
+//! | SWAP2         | ✓             | ✓           |
+//! | SWAP4         | ✓             | ✓           |
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 

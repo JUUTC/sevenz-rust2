@@ -193,8 +193,8 @@ The seek operations are minimal:
 | | BCJ IA64 | ✅ | ✅ | |
 | | BCJ2 | ✅ | ❌ | Decompression only |
 | | DELTA | ✅ | ✅ | |
-| | SWAP2 | ❌ | ❌ | Not implemented |
-| | SWAP4 | ❌ | ❌ | Not implemented |
+| | SWAP2 | ✅ | ✅ | Implemented |
+| | SWAP4 | ✅ | ✅ | Implemented |
 | **Encryption** | AES256-SHA256 | ✅ | ✅ | |
 | **Other** | Archive Comments | ❌ | ❌ | TODO in codebase |
 | | External References | ❌ | N/A | Returns unsupported |
@@ -228,18 +228,16 @@ The seek operations are minimal:
 
 ---
 
-### 1.2 Swap2/Swap4 Filter Support
+### 1.2 Swap2/Swap4 Filter Support ✅ COMPLETED
 
-**Current State:** Not implemented.
+**Status:** Implemented in `src/codec/swap.rs`
 
-**Impact:** These filters improve compression for 16-bit and 32-bit aligned binary data (audio, scientific data, etc.).
-
-**Implementation Plan:**
-1. Add method IDs for Swap2 (`0x03, 0x02`) and Swap4 (`0x03, 0x04`) in `archive.rs`
-2. Implement `Swap2Reader`/`Swap2Writer` and `Swap4Reader`/`Swap4Writer`
-3. Add decoder support in `src/decoder.rs`
-4. Add encoder support in `src/encoder.rs`
-5. Add tests
+**What was implemented:**
+- Method IDs for Swap2 (`0x03, 0x02`) and Swap4 (`0x03, 0x04`) in `archive.rs`
+- `Swap2Reader`/`Swap2Writer` and `Swap4Reader`/`Swap4Writer` in `src/codec/swap.rs`
+- Decoder support in `src/decoder.rs`
+- Encoder support in `src/encoder.rs`
+- Unit tests for roundtrip encoding/decoding
 
 **Algorithm:**
 - **Swap2:** For each pair of bytes, swap their positions
@@ -251,13 +249,17 @@ The seek operations are minimal:
   [A, B, C, D, E, F, G, H] → [D, C, B, A, H, G, F, E]
   ```
 
-**Estimated Effort:** Low
+**Usage:**
+```rust
+use sevenz_rust2::*;
 
-**Files to Modify:**
-- `src/archive.rs` - Add method IDs
-- `src/decoder.rs` - Add Swap2/Swap4 decoder cases
-- `src/encoder.rs` - Add Swap2/Swap4 encoder cases
-- New file: `src/filter/swap.rs` or add to `lzma-rust2` crate
+// Use Swap2 filter with LZMA2 compression for 16-bit audio
+let mut archive = ArchiveWriter::create("output.7z")?;
+archive.set_content_methods(vec![
+    EncoderConfiguration::new(EncoderMethod::SWAP2_FILTER),
+    EncoderConfiguration::new(EncoderMethod::LZMA2),
+]);
+```
 
 ---
 
@@ -424,7 +426,7 @@ The seek operations are minimal:
 5. Add async feature flag with tokio support (3-5 days)
 
 ### Phase 2 (Filters)
-6. Swap2/Swap4 filters (1-2 days)
+6. [x] Swap2/Swap4 filters (1-2 days) - **COMPLETED**
 7. BCJ2 compression (3-5 days)
 
 ### Phase 3 (Extended Features)

@@ -9,6 +9,7 @@ use lzma_rust2::{
 use crate::codec::brotli::BrotliEncoder;
 #[cfg(feature = "lz4")]
 use crate::codec::lz4::Lz4Encoder;
+use crate::codec::swap::{Swap2Writer, Swap4Writer};
 #[cfg(feature = "brotli")]
 use crate::encoder_options::BrotliOptions;
 #[cfg(feature = "bzip2")]
@@ -34,6 +35,8 @@ pub(crate) enum Encoder<W: Write> {
     Copy(CountingWriter<W>),
     Bcj(Option<BcjWriter<CountingWriter<W>>>),
     Delta(DeltaWriter<CountingWriter<W>>),
+    Swap2(Option<Swap2Writer<CountingWriter<W>>>),
+    Swap4(Option<Swap4Writer<CountingWriter<W>>>),
     Lzma(Option<LzmaWriter<CountingWriter<W>>>),
     Lzma2(Option<Lzma2Writer<CountingWriter<W>>>),
     Lzma2Mt(Option<Lzma2WriterMt<CountingWriter<W>>>),
@@ -65,6 +68,24 @@ impl<W: Write> Write for Encoder<W> {
             Encoder::Copy(w) => w.write(buf),
             Encoder::Delta(w) => w.write(buf),
             Encoder::Bcj(w) => match buf.is_empty() {
+                true => {
+                    let writer = w.take().unwrap();
+                    let mut inner = writer.finish()?;
+                    inner.write(buf)?;
+                    Ok(0)
+                }
+                false => w.as_mut().unwrap().write(buf),
+            },
+            Encoder::Swap2(w) => match buf.is_empty() {
+                true => {
+                    let writer = w.take().unwrap();
+                    let mut inner = writer.finish()?;
+                    inner.write(buf)?;
+                    Ok(0)
+                }
+                false => w.as_mut().unwrap().write(buf),
+            },
+            Encoder::Swap4(w) => match buf.is_empty() {
                 true => {
                     let writer = w.take().unwrap();
                     let mut inner = writer.finish()?;
@@ -163,6 +184,8 @@ impl<W: Write> Write for Encoder<W> {
             Encoder::Copy(w) => w.flush(),
             Encoder::Bcj(w) => w.as_mut().unwrap().flush(),
             Encoder::Delta(w) => w.flush(),
+            Encoder::Swap2(w) => w.as_mut().unwrap().flush(),
+            Encoder::Swap4(w) => w.as_mut().unwrap().flush(),
             Encoder::Lzma(w) => w.as_mut().unwrap().flush(),
             Encoder::Lzma2(w) => w.as_mut().unwrap().flush(),
             Encoder::Lzma2Mt(w) => w.as_mut().unwrap().flush(),
@@ -210,6 +233,8 @@ pub(crate) fn add_encoder<W: Write>(
         EncoderMethod::ID_BCJ_SPARC => Ok(Encoder::Bcj(Some(BcjWriter::new_sparc(input, 0)))),
         EncoderMethod::ID_BCJ_PPC => Ok(Encoder::Bcj(Some(BcjWriter::new_ppc(input, 0)))),
         EncoderMethod::ID_BCJ_RISCV => Ok(Encoder::Bcj(Some(BcjWriter::new_riscv(input, 0)))),
+        EncoderMethod::ID_SWAP2 => Ok(Encoder::Swap2(Some(Swap2Writer::new(input)))),
+        EncoderMethod::ID_SWAP4 => Ok(Encoder::Swap4(Some(Swap4Writer::new(input)))),
         EncoderMethod::ID_LZMA => {
             let options = match &method_config.options {
                 Some(EncoderOptions::Lzma(options)) => options.clone(),

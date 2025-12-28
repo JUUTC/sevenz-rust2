@@ -311,6 +311,10 @@ impl EncoderMethod {
     pub const ID_COPY: &'static [u8] = &[0x00];
     /// Method ID for Delta filter.
     pub const ID_DELTA: &'static [u8] = &[0x03];
+    /// Method ID for Swap2 filter (byte-swapping for 16-bit data).
+    pub const ID_SWAP2: &'static [u8] = &[0x03, 0x02];
+    /// Method ID for Swap4 filter (byte-swapping for 32-bit data).
+    pub const ID_SWAP4: &'static [u8] = &[0x03, 0x04];
 
     /// Method ID for LZMA compression.
     pub const ID_LZMA: &'static [u8] = &[0x03, 0x01, 0x01];
@@ -403,6 +407,10 @@ impl EncoderMethod {
     pub const DELTA_FILTER: Self = Self("DELTA", Self::ID_DELTA);
     /// BCJ2 filter method.
     pub const BCJ2_FILTER: Self = Self("BCJ2", Self::ID_BCJ2);
+    /// Swap2 filter method (byte-swapping for 16-bit aligned data).
+    pub const SWAP2_FILTER: Self = Self("SWAP2", Self::ID_SWAP2);
+    /// Swap4 filter method (byte-swapping for 32-bit aligned data).
+    pub const SWAP4_FILTER: Self = Self("SWAP4", Self::ID_SWAP4);
 
     const ENCODING_METHODS: &'static [&'static EncoderMethod] = &[
         &Self::COPY,
@@ -428,6 +436,8 @@ impl EncoderMethod {
         &Self::BCJ_RISCV_FILTER,
         &Self::DELTA_FILTER,
         &Self::BCJ2_FILTER,
+        &Self::SWAP2_FILTER,
+        &Self::SWAP4_FILTER,
     ];
 
     #[inline]
