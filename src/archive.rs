@@ -30,8 +30,7 @@ pub(crate) const K_A_TIME: u8 = 0x13;
 pub(crate) const K_M_TIME: u8 = 0x14;
 pub(crate) const K_WIN_ATTRIBUTES: u8 = 0x15;
 
-/// TODO: Implement reading & writing comments
-#[allow(unused)]
+/// Archive comment constant (0x16).
 pub(crate) const K_COMMENT: u8 = 0x16;
 pub(crate) const K_ENCODED_HEADER: u8 = 0x17;
 pub(crate) const K_START_POS: u8 = 0x18;
@@ -57,6 +56,8 @@ pub struct Archive {
     pub stream_map: StreamMap,
     /// Whether this is a solid archive (better compression, slower random access).
     pub is_solid: bool,
+    /// Optional archive comment.
+    pub comment: Option<String>,
 }
 
 impl Archive {
@@ -70,6 +71,11 @@ impl Archive {
     /// Used for calculating byte ranges when streaming.
     pub fn pack_sizes(&self) -> &[u64] {
         &self.pack_sizes
+    }
+
+    /// Returns the archive comment, if any.
+    pub fn comment(&self) -> Option<&str> {
+        self.comment.as_deref()
     }
 }
 

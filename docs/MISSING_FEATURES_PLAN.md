@@ -196,7 +196,7 @@ The seek operations are minimal:
 | | SWAP2 | ✅ | ✅ | Implemented |
 | | SWAP4 | ✅ | ✅ | Implemented |
 | **Encryption** | AES256-SHA256 | ✅ | ✅ | |
-| **Other** | Archive Comments | ❌ | ❌ | TODO in codebase |
+| **Other** | Archive Comments | ✅ | ✅ | Implemented |
 | | External References | ❌ | N/A | Returns unsupported |
 | | Additional Streams | ❌ | N/A | Returns unsupported |
 | | kStartPos | ❌ | N/A | Returns unsupported |
@@ -430,7 +430,7 @@ archive.set_content_methods(vec![
 7. BCJ2 compression (3-5 days)
 
 ### Phase 3 (Extended Features)
-8. Archive comments (1 day)
+8. [x] Archive comments (1 day) - **COMPLETED**
 9. kStartPos support (1 day)
 
 ### Phase 4 (Extended Codecs)

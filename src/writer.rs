@@ -92,6 +92,7 @@ pub struct ArchiveWriter<W: Write> {
     pack_info: PackInfo,
     unpack_info: UnpackInfo,
     encrypt_header: bool,
+    comment: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -187,6 +188,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             pack_info: Default::default(),
             unpack_info: Default::default(),
             encrypt_header: true,
+            comment: None,
         })
     }
 
@@ -207,6 +209,28 @@ impl<W: Write + Seek> ArchiveWriter<W> {
     /// Whether to enable the encryption of the -header. Default is `true`.
     pub fn set_encrypt_header(&mut self, enabled: bool) {
         self.encrypt_header = enabled;
+    }
+
+    /// Sets an optional archive comment.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::*;
+    ///
+    /// let mut sz = ArchiveWriter::create("path/to/archive.7z").unwrap();
+    /// sz.set_comment("This archive was created with sevenz-rust2");
+    /// // Add files...
+    /// sz.finish().unwrap();
+    /// ```
+    pub fn set_comment(&mut self, comment: impl Into<String>) -> &mut Self {
+        self.comment = Some(comment.into());
+        self
+    }
+
+    /// Clears the archive comment.
+    pub fn clear_comment(&mut self) -> &mut Self {
+        self.comment = None;
+        self
     }
 
     /// Non-solid compression - Adds an archive `entry` with data from `reader`.
@@ -606,9 +630,30 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
     fn write_header<H: Write>(&mut self, header: &mut H) -> std::io::Result<()> {
         header.write_u8(K_HEADER)?;
+        // Write archive properties if there's a comment
+        if self.comment.is_some() {
+            self.write_archive_properties(header)?;
+        }
         header.write_u8(K_MAIN_STREAMS_INFO)?;
         self.write_streams_info(header)?;
         self.write_files_info(header)?;
+        header.write_u8(K_END)?;
+        Ok(())
+    }
+
+    fn write_archive_properties<H: Write>(&self, header: &mut H) -> std::io::Result<()> {
+        header.write_u8(K_ARCHIVE_PROPERTIES)?;
+        if let Some(comment) = &self.comment {
+            // Write comment property
+            header.write_u8(K_COMMENT)?;
+
+            // Convert comment to UTF-16LE with null terminator
+            let utf16: Vec<u16> = comment.encode_utf16().chain(std::iter::once(0)).collect();
+            let bytes: Vec<u8> = utf16.iter().flat_map(|&c| c.to_le_bytes()).collect();
+
+            write_u64(header, bytes.len() as u64)?;
+            header.write_all(&bytes)?;
+        }
         header.write_u8(K_END)?;
         Ok(())
     }

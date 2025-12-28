@@ -255,7 +255,7 @@ impl Archive {
     fn read_header<R: Read + Seek>(header: &mut R, archive: &mut Archive) -> Result<(), Error> {
         let mut nid = header.read_u8()?;
         if nid == K_ARCHIVE_PROPERTIES {
-            Self::read_archive_properties(header)?;
+            Self::read_archive_properties(header, archive)?;
             nid = header.read_u8()?;
         }
 
@@ -277,11 +277,34 @@ impl Archive {
         Ok(())
     }
 
-    fn read_archive_properties<R: Read + Seek>(header: &mut R) -> Result<(), Error> {
+    fn read_archive_properties<R: Read + Seek>(
+        header: &mut R,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
         let mut nid = header.read_u8()?;
         while nid != K_END {
             let property_size = read_variable_usize(header, "propertySize")?;
-            header.seek(SeekFrom::Current(property_size as i64))?;
+            if nid == K_COMMENT {
+                // Read comment as UTF-16LE
+                let mut bytes = vec![0u8; property_size];
+                header.read_exact(&mut bytes)?;
+
+                // Convert from UTF-16LE to String
+                if bytes.len() >= 2 {
+                    let utf16: Vec<u16> = bytes
+                        .chunks_exact(2)
+                        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                        .take_while(|&c| c != 0) // Stop at null terminator
+                        .collect();
+
+                    if let Ok(comment) = String::from_utf16(&utf16) {
+                        archive.comment = Some(comment);
+                    }
+                }
+            } else {
+                // Skip unknown properties
+                header.seek(SeekFrom::Current(property_size as i64))?;
+            }
             nid = header.read_u8()?;
         }
         Ok(())
