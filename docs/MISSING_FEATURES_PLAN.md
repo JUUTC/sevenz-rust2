@@ -2,6 +2,139 @@
 
 This document outlines features present in the official 7-zip.org implementation that are missing or incomplete in the sevenz-rust2 Rust implementation.
 
+---
+
+## Priority 1: Streaming Compression API (Highest Priority)
+
+### Current Streaming Capabilities
+
+The sevenz-rust2 library **already supports streaming input** for compression:
+
+```rust
+// Stream from any Read implementation (memory, network, etc.)
+pub fn push_archive_entry<R: Read>(
+    &mut self,
+    entry: ArchiveEntry,
+    reader: Option<R>,  // ← Accepts any std::io::Read!
+) -> Result<&ArchiveEntry>
+```
+
+**What works today:**
+- ✅ **Memory streams**: Use `std::io::Cursor<Vec<u8>>` or `&[u8]` as input
+- ✅ **Network streams**: Any `impl Read` can be used, including TCP streams
+- ✅ **Buffered readers**: Wrap any source with `BufReader` for performance
+- ✅ **Chained readers**: Use `std::io::Chain` to concatenate streams
+- ✅ **Multiple files**: `push_archive_entries()` accepts `Vec<SourceReader<R>>`
+
+**Example - Streaming from memory cache:**
+```rust
+use sevenz_rust2::*;
+use std::io::Cursor;
+
+// Your cached content
+let cached_data: Vec<u8> = download_or_get_from_cache();
+
+// Create archive from stream
+let mut archive = ArchiveWriter::create("output.7z")?;
+let entry = ArchiveEntry::new_file("cached_file.dat");
+archive.push_archive_entry(entry, Some(Cursor::new(cached_data)))?;
+archive.finish()?;
+```
+
+**Example - Feeding from active download stream:**
+```rust
+use sevenz_rust2::*;
+use std::sync::mpsc::{Receiver, channel};
+
+// Example: A stream fed by a background download thread
+struct DownloadStream {
+    receiver: Receiver<Vec<u8>>,
+    buffer: Vec<u8>,
+    position: usize,
+}
+
+impl DownloadStream {
+    fn new(receiver: Receiver<Vec<u8>>) -> Self {
+        Self { receiver, buffer: Vec::new(), position: 0 }
+    }
+}
+
+impl std::io::Read for DownloadStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Refill buffer if empty
+        if self.position >= self.buffer.len() {
+            match self.receiver.recv() {
+                Ok(data) => {
+                    self.buffer = data;
+                    self.position = 0;
+                }
+                Err(_) => return Ok(0), // Channel closed = EOF
+            }
+        }
+        // Copy available data to output buffer
+        let available = &self.buffer[self.position..];
+        let to_copy = available.len().min(buf.len());
+        buf[..to_copy].copy_from_slice(&available[..to_copy]);
+        self.position += to_copy;
+        Ok(to_copy)
+    }
+}
+
+// Usage:
+let (tx, rx) = channel();
+let download = DownloadStream::new(rx);
+
+// Background thread sends chunks: tx.send(chunk).unwrap();
+let mut archive = ArchiveWriter::create("output.7z")?;
+archive.push_archive_entry(ArchiveEntry::new_file("downloaded.dat"), Some(download))?;
+archive.finish()?;
+```
+
+### Current Limitation: Output Requires Seek
+
+The 7z format requires writing a header at file start that references the end-of-file position. This means:
+
+```rust
+// ArchiveWriter requires Write + Seek
+impl<W: Write + Seek> ArchiveWriter<W>
+```
+
+**Workaround for pure streaming output:**
+1. Write to a temporary seekable buffer (file or `Vec<u8>`)
+2. Then stream that buffer to final destination
+
+### Planned Enhancements
+
+| Enhancement | Description | Priority |
+|-------------|-------------|----------|
+| **Streaming Output** | Buffer-then-stream pattern for non-seekable outputs | High |
+| **Progressive API** | Add entries incrementally with size hints | Medium |
+| **Async Support** | `AsyncRead`/`AsyncWrite` traits (via tokio feature) | Medium |
+| **Backpressure** | Flow control for slow consumers | Low |
+
+### Implementation Plan for Enhanced Streaming
+
+1. **Add `StreamingArchiveWriter`** - A wrapper that buffers to memory/temp file
+2. **Add size estimation** - Allow pre-declaring file sizes for better memory planning
+3. **Add progress callbacks** - Report bytes processed for UI/monitoring
+4. **Async feature flag** - Optional async variants using tokio/async-std
+
+### Performance Tips for Streaming
+
+1. **Buffer size**: The internal compression buffer is 4KB. For network streams with higher latency,
+   wrap with a larger buffer to reduce syscall overhead:
+   ```rust
+   // 64KB is a good balance: large enough to amortize syscall overhead,
+   // small enough to keep memory usage reasonable for multiple streams
+   let buffered = BufReader::with_capacity(64 * 1024, network_stream);
+   // For high-bandwidth local I/O, consider 256KB buffers
+   let buffered = BufReader::with_capacity(256 * 1024, fast_ssd_file);
+   ```
+2. **Parallel feeding**: Use `push_archive_entries()` with solid=false for independent compression
+3. **Memory limits**: For very large streams, consider chunking into separate archive entries
+
+---
+
 ## Feature Gap Analysis
 
 ### Current Implementation Status
@@ -239,42 +372,47 @@ This document outlines features present in the official 7-zip.org implementation
 
 ---
 
-### O3: Streaming Compression
+### O3: Larger Internal Buffers
 
-**Current State:** All data must be available before compression.
+**Current State:** 4KB internal buffer for stream processing.
 
-**Potential:** Allow streaming input for very large files.
+**Potential:** Larger buffers (64KB-256KB) can improve throughput for network/disk I/O.
 
 **Implementation:**
-1. Add streaming API that flushes blocks periodically
-2. Would require non-solid mode
+1. Make buffer size configurable
+2. Use adaptive buffering based on source type
 
 ---
 
 ## Implementation Roadmap
 
-### Phase 1 (Core Completeness)
+### Phase 1 (Streaming & Core - Highest Priority)
 1. [x] Current state analysis
-2. Swap2/Swap4 filters (1-2 days)
-3. Archive comments (1 day)
+2. [x] Document existing streaming capabilities
+3. Add `StreamingArchiveWriter` for non-seekable outputs (2-3 days)
+4. Add progress callbacks for stream monitoring (1 day)
+5. Add async feature flag with tokio support (3-5 days)
 
-### Phase 2 (Advanced Filters)  
-4. BCJ2 compression (3-5 days)
-5. kStartPos support (1 day)
+### Phase 2 (Filters)
+6. Swap2/Swap4 filters (1-2 days)
+7. BCJ2 compression (3-5 days)
 
-### Phase 3 (Extended Codecs)
-6. Deflate64 (2-3 days if library available)
-7. LZS codec (2-3 days)
-8. LIZARD codec (2-3 days)
+### Phase 3 (Extended Features)
+8. Archive comments (1 day)
+9. kStartPos support (1 day)
 
-### Phase 4 (Complex Features)
-9. External references (5+ days)
-10. Additional streams (3-5 days)
+### Phase 4 (Extended Codecs)
+10. Deflate64 (2-3 days if library available)
+11. LZS codec (2-3 days)
+12. LIZARD codec (2-3 days)
 
-### Phase 5 (Optimizations)
-11. Parallel decompression API
-12. Memory-mapped file support
-13. Streaming compression API
+### Phase 5 (Complex Features)
+13. External references (5+ days)
+14. Additional streams (3-5 days)
+
+### Phase 6 (Optimizations)
+15. Parallel decompression API
+16. Memory-mapped file support
 
 ---
 
