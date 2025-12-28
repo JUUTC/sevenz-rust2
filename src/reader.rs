@@ -610,7 +610,21 @@ impl Archive {
                         }
                     }
                 }
-                K_START_POS => return Err(Error::other("kStartPos is unsupported, please report")),
+                K_START_POS => {
+                    let positions_defined = read_all_or_bits(header, num_files)?;
+                    let external = header.read_u8()?;
+                    if external != 0 {
+                        return Err(Error::other(format!(
+                            "kStartPos Unimplemented:external={external}"
+                        )));
+                    }
+                    for (i, file) in files.iter_mut().enumerate() {
+                        file.has_start_pos = positions_defined.contains(i);
+                        if file.has_start_pos {
+                            file.start_pos = header.read_u64()?;
+                        }
+                    }
+                }
                 K_DUMMY => {
                     header.seek(SeekFrom::Current(size as i64))?;
                 }

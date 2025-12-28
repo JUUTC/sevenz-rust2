@@ -126,6 +126,10 @@ pub struct ArchiveEntry {
     pub size: u64,
     /// Compressed size in bytes.
     pub compressed_size: u64,
+    /// Whether start position is present (for sparse files).
+    pub has_start_pos: bool,
+    /// Start position within the uncompressed file data (for sparse files).
+    pub start_pos: u64,
 }
 
 impl ArchiveEntry {

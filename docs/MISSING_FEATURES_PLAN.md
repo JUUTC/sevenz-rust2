@@ -199,7 +199,7 @@ The seek operations are minimal:
 | **Other** | Archive Comments | ✅ | ✅ | Implemented |
 | | External References | ❌ | N/A | Returns unsupported |
 | | Additional Streams | ❌ | N/A | Returns unsupported |
-| | kStartPos | ❌ | N/A | Returns unsupported |
+| | kStartPos | ✅ | N/A | Read support implemented |
 
 ---
 
@@ -431,7 +431,7 @@ archive.set_content_methods(vec![
 
 ### Phase 3 (Extended Features)
 8. [x] Archive comments (1 day) - **COMPLETED**
-9. kStartPos support (1 day)
+9. [x] kStartPos support (1 day) - **COMPLETED**
 
 ### Phase 4 (Extended Codecs)
 10. Deflate64 (2-3 days if library available)
