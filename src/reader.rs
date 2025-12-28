@@ -1637,6 +1637,69 @@ impl<R: Read + Seek> ArchiveReader<R> {
 
         Ok(())
     }
+
+    /// Tests the integrity of the archive by decompressing all entries and verifying CRCs.
+    ///
+    /// This is equivalent to 7z's `-t` (test) flag. It validates:
+    /// - Header integrity (signature and CRC)
+    /// - Compressed data can be decompressed successfully
+    /// - File CRCs match (when available)
+    ///
+    /// # Returns
+    /// - `Ok(TestResult)` containing statistics about the test
+    /// - `Err(Error)` if any integrity check fails
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::{ArchiveReader, Password};
+    ///
+    /// let mut reader = ArchiveReader::open("archive.7z", Password::empty()).unwrap();
+    /// let result = reader.test_integrity().unwrap();
+    /// println!("Tested {} files, {} bytes", result.files_tested, result.bytes_tested);
+    /// ```
+    pub fn test_integrity(&mut self) -> Result<TestResult, Error> {
+        let mut result = TestResult {
+            files_tested: 0,
+            bytes_tested: 0,
+            crcs_verified: 0,
+        };
+
+        // Test all entries by decompressing them
+        self.for_each_entries(|entry, reader| {
+            // Read all data to trigger CRC verification
+            let mut bytes_read = 0u64;
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                bytes_read += n as u64;
+            }
+
+            result.files_tested += 1;
+            result.bytes_tested += bytes_read;
+            if entry.has_crc {
+                result.crcs_verified += 1;
+            }
+            Ok(true)
+        })?;
+
+        Ok(result)
+    }
+}
+
+/// Result of an archive integrity test.
+///
+/// Contains statistics about what was tested during the integrity check.
+#[derive(Debug, Clone, Default)]
+pub struct TestResult {
+    /// Number of files that were decompressed and tested.
+    pub files_tested: usize,
+    /// Total bytes decompressed during the test.
+    pub bytes_tested: u64,
+    /// Number of files whose CRC was verified.
+    pub crcs_verified: usize,
 }
 
 /// Decoder for a specific block within a 7z archive.
