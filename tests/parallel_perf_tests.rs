@@ -975,8 +975,8 @@ fn test_parallel_solid_compression_large_files() {
                 filename
             );
             assert_eq!(
-                hash(&decompressed),
                 hash(original_data),
+                hash(&decompressed),
                 "Content mismatch for {}",
                 filename
             );
