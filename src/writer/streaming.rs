@@ -194,6 +194,29 @@ impl<W: Write> StreamingArchiveWriter<W> {
         Ok(self)
     }
 
+    /// Adds multiple entries with solid compression using parallel stream fetching.
+    ///
+    /// This method enables overlapping I/O with compression for high-latency
+    /// data sources. See `ArchiveWriter::push_solid_entries_parallel` for details.
+    ///
+    /// # Arguments
+    /// * `entries` - Archive entries (metadata only)
+    /// * `provider` - Parallel stream provider that fetches data
+    /// * `config` - Configuration for batch size and buffer size
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn push_solid_entries_parallel<P: super::parallel_provider::ParallelStreamProvider>(
+        &mut self,
+        entries: Vec<ArchiveEntry>,
+        provider: &mut P,
+        config: super::parallel_provider::ParallelSolidConfig,
+    ) -> Result<&mut Self, Error> {
+        let inner = self.inner.as_mut().ok_or_else(|| {
+            Error::other("StreamingArchiveWriter already finished")
+        })?;
+        inner.push_solid_entries_parallel(entries, provider, config)?;
+        Ok(self)
+    }
+
     /// Finishes the compression and writes the complete archive to the output.
     ///
     /// This method:
