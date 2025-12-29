@@ -165,6 +165,39 @@ let mut writer = ArchiveWriter::create("dest.7z").expect("create writer ok");
 writer.configure_parallel(config, 6);  // Level 6 compression
 ```
 
+#### Smart Cache Prefetch Hints
+
+For callers with smart caches that want to pre-populate data just-in-time, use the `PrefetchQueue` to get hints about upcoming blobs:
+
+```rust
+use sevenz_rust2::perf::{PrefetchQueue, FnPrefetchCallback, PrefetchHint};
+
+// Create a callback to receive prefetch hints
+let callback = FnPrefetchCallback::new(|hints: &[PrefetchHint<String>]| {
+    for hint in hints {
+        println!("Upcoming blob: {} (lookahead: {})", hint.id, hint.lookahead_index);
+        // Pre-populate your cache here for hint.id
+    }
+});
+
+// Create a queue with your file list and lookahead count
+let files = vec!["file1.txt".to_string(), "file2.txt".to_string(), "file3.txt".to_string()];
+let mut queue = PrefetchQueue::new(files, 3, callback);
+
+// Process items - each call to next() triggers prefetch hints for upcoming items
+while let Some(filename) = queue.next() {
+    // The callback has already been notified about the next 3 files
+    // so your cache can pre-load them in parallel
+    println!("Processing: {}", filename);
+}
+```
+
+The `PrefetchQueue` supports:
+- Configurable lookahead count (1-16 items ahead)
+- `peek_upcoming()` to see what's coming without advancing
+- `remaining()` to check how many items are left
+- Works with any `Clone` type for blob identifiers
+
 ### WASM support
 
 WASM is supported, but you can't use the default features. We provide a "default_wasm" feature that contains

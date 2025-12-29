@@ -309,6 +309,228 @@ pub fn buffered_copy_with_crc<R: Read, W: Write>(
     Ok((total, hasher.finalize()))
 }
 
+/// Default lookahead count for prefetch hints
+pub const DEFAULT_LOOKAHEAD_COUNT: usize = 4;
+
+/// A hint about an upcoming blob/entry that will be requested.
+///
+/// This allows callers with smart caches to pre-populate data just-in-time,
+/// minimizing memory usage while maximizing I/O throughput.
+#[derive(Debug, Clone)]
+pub struct PrefetchHint<T> {
+    /// The identifier for the upcoming blob (e.g., file path, key, index).
+    pub id: T,
+    /// The index in the processing queue (0 = next, 1 = after next, etc.).
+    pub lookahead_index: usize,
+    /// Optional estimated size of the blob in bytes.
+    pub estimated_size: Option<u64>,
+}
+
+impl<T> PrefetchHint<T> {
+    /// Creates a new prefetch hint.
+    pub fn new(id: T, lookahead_index: usize) -> Self {
+        Self {
+            id,
+            lookahead_index,
+            estimated_size: None,
+        }
+    }
+
+    /// Creates a prefetch hint with an estimated size.
+    pub fn with_size(id: T, lookahead_index: usize, estimated_size: u64) -> Self {
+        Self {
+            id,
+            lookahead_index,
+            estimated_size: Some(estimated_size),
+        }
+    }
+}
+
+/// A callback trait for receiving prefetch hints.
+///
+/// Implement this trait to receive notifications about which blobs will be
+/// requested next, allowing you to pre-populate a smart cache just-in-time.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::{PrefetchCallback, PrefetchHint};
+///
+/// struct MyCache {
+///     // Your cache implementation
+/// }
+///
+/// impl PrefetchCallback<String> for MyCache {
+///     fn on_prefetch_hint(&mut self, hints: &[PrefetchHint<String>]) {
+///         for hint in hints {
+///             println!("Pre-loading blob: {} (lookahead: {})", hint.id, hint.lookahead_index);
+///             // Pre-populate your cache here
+///         }
+///     }
+/// }
+/// ```
+pub trait PrefetchCallback<T> {
+    /// Called with hints about upcoming blobs that will be requested.
+    ///
+    /// The hints are ordered by `lookahead_index`, with 0 being the next blob
+    /// to be requested. This allows smart caches to pre-populate data
+    /// just-in-time while minimizing memory usage.
+    fn on_prefetch_hint(&mut self, hints: &[PrefetchHint<T>]);
+}
+
+/// A no-op prefetch callback that ignores all hints.
+///
+/// Use this when you don't need prefetch notifications.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopPrefetchCallback;
+
+impl<T> PrefetchCallback<T> for NoopPrefetchCallback {
+    fn on_prefetch_hint(&mut self, _hints: &[PrefetchHint<T>]) {
+        // No-op
+    }
+}
+
+/// A prefetch callback that uses a closure.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::{FnPrefetchCallback, PrefetchHint};
+///
+/// let callback = FnPrefetchCallback::new(|hints: &[PrefetchHint<String>]| {
+///     for hint in hints {
+///         println!("Upcoming blob: {}", hint.id);
+///     }
+/// });
+/// ```
+pub struct FnPrefetchCallback<T, F: FnMut(&[PrefetchHint<T>])> {
+    callback: F,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T, F: FnMut(&[PrefetchHint<T>])> FnPrefetchCallback<T, F> {
+    /// Creates a new callback from a closure.
+    pub fn new(callback: F) -> Self {
+        Self {
+            callback,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T, F: FnMut(&[PrefetchHint<T>])> PrefetchCallback<T> for FnPrefetchCallback<T, F> {
+    fn on_prefetch_hint(&mut self, hints: &[PrefetchHint<T>]) {
+        (self.callback)(hints);
+    }
+}
+
+/// A queue that tracks items and provides lookahead hints for prefetching.
+///
+/// This is useful for compression workflows where you want to notify
+/// callers about upcoming blobs so they can pre-populate their cache.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::{PrefetchQueue, FnPrefetchCallback, PrefetchHint};
+///
+/// let items = vec!["file1.txt", "file2.txt", "file3.txt", "file4.txt"];
+/// let callback = FnPrefetchCallback::new(|hints: &[PrefetchHint<&str>]| {
+///     for hint in hints {
+///         println!("Upcoming: {} (index: {})", hint.id, hint.lookahead_index);
+///     }
+/// });
+///
+/// let mut queue = PrefetchQueue::new(items, 3, callback);
+///
+/// while let Some(item) = queue.next() {
+///     println!("Processing: {}", item);
+/// }
+/// ```
+pub struct PrefetchQueue<T: Clone, C: PrefetchCallback<T>> {
+    items: Vec<T>,
+    current_index: usize,
+    lookahead_count: usize,
+    callback: C,
+}
+
+impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
+    /// Creates a new prefetch queue with the given items and lookahead count.
+    ///
+    /// # Arguments
+    /// * `items` - The items to process in order.
+    /// * `lookahead_count` - How many items ahead to hint (1-16).
+    /// * `callback` - The callback to receive prefetch hints.
+    pub fn new(items: Vec<T>, lookahead_count: usize, callback: C) -> Self {
+        let lookahead_count = lookahead_count.clamp(1, 16);
+        let mut queue = Self {
+            items,
+            current_index: 0,
+            lookahead_count,
+            callback,
+        };
+        // Send initial prefetch hints
+        queue.send_hints();
+        queue
+    }
+
+    /// Returns the number of remaining items.
+    pub fn remaining(&self) -> usize {
+        self.items.len().saturating_sub(self.current_index)
+    }
+
+    /// Returns the current index in the queue.
+    pub fn current_index(&self) -> usize {
+        self.current_index
+    }
+
+    /// Returns the total number of items.
+    pub fn total_count(&self) -> usize {
+        self.items.len()
+    }
+
+    /// Gets the next item and sends prefetch hints for upcoming items.
+    pub fn next(&mut self) -> Option<T> {
+        if self.current_index >= self.items.len() {
+            return None;
+        }
+
+        let item = self.items[self.current_index].clone();
+        self.current_index += 1;
+        
+        // Send hints for the next items
+        self.send_hints();
+        
+        Some(item)
+    }
+
+    /// Peeks at upcoming items without advancing the queue.
+    ///
+    /// Returns up to `count` upcoming items starting from the current position.
+    pub fn peek_upcoming(&self, count: usize) -> &[T] {
+        let start = self.current_index;
+        let end = (start + count).min(self.items.len());
+        &self.items[start..end]
+    }
+
+    fn send_hints(&mut self) {
+        let start = self.current_index;
+        let end = (start + self.lookahead_count).min(self.items.len());
+        
+        if start >= end {
+            return;
+        }
+
+        let hints: Vec<PrefetchHint<T>> = self.items[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, item)| PrefetchHint::new(item.clone(), i))
+            .collect();
+
+        self.callback.on_prefetch_hint(&hints);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +635,91 @@ mod tests {
         
         let config = ParallelConfig::new().with_parallel_input_streams(100);
         assert_eq!(config.parallel_input_streams, 64);
+    }
+
+    #[test]
+    fn test_prefetch_hint() {
+        let hint = PrefetchHint::new("test.txt", 0);
+        assert_eq!(hint.id, "test.txt");
+        assert_eq!(hint.lookahead_index, 0);
+        assert!(hint.estimated_size.is_none());
+
+        let hint_with_size = PrefetchHint::with_size("big.bin", 1, 1024 * 1024);
+        assert_eq!(hint_with_size.id, "big.bin");
+        assert_eq!(hint_with_size.lookahead_index, 1);
+        assert_eq!(hint_with_size.estimated_size, Some(1024 * 1024));
+    }
+
+    #[test]
+    fn test_prefetch_queue_basic() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let received_hints: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
+        let hints_clone = received_hints.clone();
+
+        let callback = FnPrefetchCallback::new(move |hints: &[PrefetchHint<String>]| {
+            let ids: Vec<String> = hints.iter().map(|h| h.id.clone()).collect();
+            hints_clone.borrow_mut().push(ids);
+        });
+
+        let items = vec![
+            "file1.txt".to_string(),
+            "file2.txt".to_string(),
+            "file3.txt".to_string(),
+            "file4.txt".to_string(),
+        ];
+
+        let mut queue = PrefetchQueue::new(items, 2, callback);
+        
+        // Initial hints should include first 2 items
+        assert_eq!(received_hints.borrow().len(), 1);
+        assert_eq!(received_hints.borrow()[0], vec!["file1.txt", "file2.txt"]);
+
+        // Get first item
+        let item = queue.next().unwrap();
+        assert_eq!(item, "file1.txt");
+        // Should now hint file2 and file3
+        assert_eq!(received_hints.borrow()[1], vec!["file2.txt", "file3.txt"]);
+
+        // Get second item
+        let item = queue.next().unwrap();
+        assert_eq!(item, "file2.txt");
+        // Should now hint file3 and file4
+        assert_eq!(received_hints.borrow()[2], vec!["file3.txt", "file4.txt"]);
+
+        // Get third item
+        let item = queue.next().unwrap();
+        assert_eq!(item, "file3.txt");
+        // Should now hint only file4
+        assert_eq!(received_hints.borrow()[3], vec!["file4.txt"]);
+
+        // Get fourth item
+        let item = queue.next().unwrap();
+        assert_eq!(item, "file4.txt");
+
+        // No more items
+        assert!(queue.next().is_none());
+    }
+
+    #[test]
+    fn test_prefetch_queue_peek() {
+        let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let queue = PrefetchQueue::new(items, 2, NoopPrefetchCallback);
+        
+        let upcoming = queue.peek_upcoming(3);
+        assert_eq!(upcoming, &["a", "b", "c"]);
+        
+        assert_eq!(queue.remaining(), 3);
+        assert_eq!(queue.current_index(), 0);
+        assert_eq!(queue.total_count(), 3);
+    }
+
+    #[test]
+    fn test_noop_prefetch_callback() {
+        let mut callback = NoopPrefetchCallback;
+        let hints = vec![PrefetchHint::new("test", 0)];
+        // Should not panic
+        callback.on_prefetch_hint(&hints);
     }
 }
