@@ -3,6 +3,8 @@ mod counting_writer;
 mod lazy_file_reader;
 mod pack_info;
 #[cfg(not(target_arch = "wasm32"))]
+mod parallel_provider;
+#[cfg(not(target_arch = "wasm32"))]
 mod parallel_reader;
 mod progress;
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,6 +28,11 @@ use crc32fast::Hasher;
 
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::parallel_provider::{
+    ParallelStreamProvider, VecParallelStreamProvider, ParallelSolidConfig,
+    DEFAULT_PARALLEL_BATCH_SIZE, MIN_PARALLEL_BATCH_SIZE, MAX_PARALLEL_BATCH_SIZE,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use self::parallel_reader::{BackgroundReader, BufferedChunkReader, ParallelPrefetchReader};
 pub use self::progress::{
@@ -716,6 +723,197 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         );
 
         self.files.extend(entries);
+        Ok(self)
+    }
+
+    /// Solid compression with parallel input stream fetching.
+    ///
+    /// This method enables overlapping I/O with compression, which can dramatically
+    /// improve performance when the data source has latency (e.g., Azure Blob Storage,
+    /// remote file systems, or network storage).
+    ///
+    /// Unlike `push_archive_entries` which requests files sequentially, this method:
+    /// - Announces upcoming file indices to the provider (lookahead)
+    /// - Allows the provider to fetch multiple files in parallel
+    /// - Consumes streams in order as they become ready
+    ///
+    /// # Arguments
+    /// * `entries` - Archive entries (metadata only, no data yet)
+    /// * `provider` - Parallel stream provider that fetches data
+    /// * `config` - Configuration for batch size and buffer size
+    ///
+    /// # Performance
+    ///
+    /// For high-latency sources with many files, this can provide 10-100x speedup:
+    /// - 50K files at 170ms latency: 2.4 hours → 2.3 minutes (with 64-way parallelism)
+    ///
+    /// # Order Preservation
+    ///
+    /// Files are always compressed in the exact order specified by `entries`.
+    /// Parallel fetching is for I/O only; compression remains sequential as required
+    /// by the 7z solid block format.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use sevenz_rust2::{ArchiveWriter, ArchiveEntry, VecParallelStreamProvider, ParallelSolidConfig};
+    ///
+    /// let mut archive = ArchiveWriter::create("output.7z").unwrap();
+    ///
+    /// // Prepare entries and data
+    /// let entries = vec![
+    ///     ArchiveEntry::new_file("file1.txt"),
+    ///     ArchiveEntry::new_file("file2.txt"),
+    /// ];
+    /// let data = vec![
+    ///     b"Content of file 1".to_vec(),
+    ///     b"Content of file 2".to_vec(),
+    /// ];
+    ///
+    /// // Create a parallel stream provider
+    /// let mut provider = VecParallelStreamProvider::new(data);
+    ///
+    /// // Compress with parallel fetching
+    /// archive.push_solid_entries_parallel(
+    ///     entries,
+    ///     &mut provider,
+    ///     ParallelSolidConfig::default(),
+    /// ).unwrap();
+    ///
+    /// archive.finish().unwrap();
+    /// ```
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn push_solid_entries_parallel<P: parallel_provider::ParallelStreamProvider>(
+        &mut self,
+        entries: Vec<ArchiveEntry>,
+        provider: &mut P,
+        config: parallel_provider::ParallelSolidConfig,
+    ) -> Result<&mut Self> {
+        use crc32fast::Hasher as CrcHasher;
+
+        if entries.is_empty() {
+            return Ok(self);
+        }
+
+        let entry_count = entries.len();
+        let batch_size = config.batch_size.min(provider.parallelism()).max(1);
+        let buffer_size = config.buffer_size;
+
+        // Track per-entry statistics (size, CRC)
+        struct EntryStats {
+            size: u64,
+            crc: u32,
+        }
+        let mut entry_stats: Vec<EntryStats> = Vec::with_capacity(entry_count);
+
+        let mut compressed_len = 0;
+        let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+        let content_methods = &self.content_methods;
+        let mut more_sizes: Vec<Rc<Cell<usize>>> = Vec::with_capacity(content_methods.len() - 1);
+
+        let (total_crc, total_size) = {
+            let mut w = Self::create_writer(content_methods, &mut compressed, &mut more_sizes)?;
+            let mut write_len = 0;
+            let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
+
+            let mut buf = vec![0u8; buffer_size];
+            let mut current_idx: usize = 0;
+
+            while current_idx < entry_count {
+                // Calculate next batch to prefetch
+                let prefetch_end = (current_idx + batch_size).min(entry_count);
+                let indices: Vec<u32> = (current_idx..prefetch_end).map(|i| i as u32).collect();
+
+                // Notify provider about upcoming streams
+                provider.prepare_streams(&indices);
+
+                // Process each entry in order
+                for idx in current_idx..prefetch_end {
+                    let entry = &entries[idx];
+
+                    // Get the stream (blocking if necessary)
+                    let stream = provider.get_stream_blocking(idx as u32).ok_or_else(|| {
+                        Error::other(format!(
+                            "Failed to get stream for entry {} (index {})",
+                            entry.name(),
+                            idx
+                        ))
+                    })?;
+
+                    // Read and compress the entire stream, tracking size and CRC
+                    let mut entry_size: u64 = 0;
+                    let mut entry_hasher = CrcHasher::new();
+                    let mut reader = stream;
+
+                    loop {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                entry_hasher.update(&buf[..n]);
+                                entry_size += n as u64;
+                                w.write_all(&buf[..n]).map_err(|e| {
+                                    Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                                })?;
+                            }
+                            Err(e) => {
+                                provider.cancel();
+                                return Err(Error::io_msg(
+                                    e,
+                                    format!("Read error for entry:{}", entry.name()),
+                                ));
+                            }
+                        }
+                    }
+
+                    entry_stats.push(EntryStats {
+                        size: entry_size,
+                        crc: entry_hasher.finalize(),
+                    });
+                }
+
+                current_idx = prefetch_end;
+            }
+
+            w.flush().map_err(|e| Error::io_msg(e, "Flush solid block"))?;
+            w.write(&[]).map_err(|e| Error::io_msg(e, "Finalize solid block"))?;
+
+            (w.crc_value(), write_len)
+        };
+
+        let compressed_crc = compressed.crc_value();
+
+        // Build sub-stream info from tracked stats
+        let mut sub_stream_crcs = Vec::with_capacity(entry_count);
+        let mut sub_stream_sizes = Vec::with_capacity(entry_count);
+        let mut final_entries = entries;
+
+        for (i, stats) in entry_stats.into_iter().enumerate() {
+            let entry = &mut final_entries[i];
+            entry.crc = stats.crc as u64;
+            entry.size = stats.size;
+            entry.has_crc = true;
+            entry.has_stream = true;
+            sub_stream_crcs.push(stats.crc);
+            sub_stream_sizes.push(stats.size);
+        }
+
+        self.pack_info
+            .add_stream(compressed_len as u64, compressed_crc);
+
+        let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
+        sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
+        sizes.push(total_size as u64);
+
+        self.unpack_info.add_multiple(
+            content_methods.clone(),
+            sizes,
+            total_crc,
+            final_entries.len() as u64,
+            sub_stream_sizes,
+            sub_stream_crcs,
+        );
+
+        self.files.extend(final_entries);
         Ok(self)
     }
 

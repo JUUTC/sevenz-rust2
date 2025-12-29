@@ -776,3 +776,289 @@ fn test_stress_background_reader_concurrent_reads() {
         handle.join().unwrap();
     }
 }
+
+// ============================================================================
+// Integration Tests - Parallel Solid Compression
+// ============================================================================
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_basic() {
+    // Create test data
+    let file_data: Vec<Vec<u8>> = vec![
+        b"Content of file 1".to_vec(),
+        b"Content of file 2, which is longer".to_vec(),
+        b"File 3".to_vec(),
+        b"File 4 with some more content to compress".to_vec(),
+    ];
+
+    let entries: Vec<ArchiveEntry> = vec![
+        ArchiveEntry::new_file("file1.txt"),
+        ArchiveEntry::new_file("file2.txt"),
+        ArchiveEntry::new_file("file3.txt"),
+        ArchiveEntry::new_file("file4.txt"),
+    ];
+
+    // Create archive using parallel solid compression
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(file_data.clone());
+
+        writer
+            .push_solid_entries_parallel(entries, &mut provider, ParallelSolidConfig::default())
+            .expect("parallel solid compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Verify archive was created
+    assert!(!archive_bytes.is_empty());
+    assert_eq!(&archive_bytes[0..6], &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
+
+    // Decompress and verify
+    {
+        let mut reader = ArchiveReader::new(Cursor::new(archive_bytes.as_slice()), Password::empty())
+            .expect("failed to open archive");
+
+        for (i, original_data) in file_data.iter().enumerate() {
+            let filename = format!("file{}.txt", i + 1);
+            let decompressed = reader.read_file(&filename).expect("decompression failed");
+            assert_eq!(
+                &decompressed, original_data,
+                "Data mismatch for {}",
+                filename
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_empty_entries() {
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(vec![]);
+
+        writer
+            .push_solid_entries_parallel(vec![], &mut provider, ParallelSolidConfig::default())
+            .expect("empty parallel solid compression should work");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Should produce a valid empty archive
+    assert!(!archive_bytes.is_empty());
+    assert_eq!(&archive_bytes[0..6], &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_single_file() {
+    let data = b"Single file content".to_vec();
+    let entries = vec![ArchiveEntry::new_file("single.txt")];
+
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(vec![data.clone()]);
+
+        writer
+            .push_solid_entries_parallel(entries, &mut provider, ParallelSolidConfig::default())
+            .expect("single file parallel compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Verify decompression
+    {
+        let mut reader = ArchiveReader::new(Cursor::new(archive_bytes.as_slice()), Password::empty())
+            .expect("failed to open archive");
+
+        let decompressed = reader.read_file("single.txt").expect("decompression failed");
+        assert_eq!(decompressed, data);
+    }
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_many_files() {
+    // Test with many small files (similar to production workload)
+    let file_count = 100;
+    let file_data: Vec<Vec<u8>> = (0..file_count)
+        .map(|i| format!("Content of file number {}", i).into_bytes())
+        .collect();
+
+    let entries: Vec<ArchiveEntry> = (0..file_count)
+        .map(|i| ArchiveEntry::new_file(&format!("file_{:04}.txt", i)))
+        .collect();
+
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::with_parallelism(file_data.clone(), 32);
+
+        writer
+            .push_solid_entries_parallel(
+                entries,
+                &mut provider,
+                ParallelSolidConfig::new().with_batch_size(16),
+            )
+            .expect("many files parallel compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Verify all files decompress correctly
+    {
+        let mut reader = ArchiveReader::new(Cursor::new(archive_bytes.as_slice()), Password::empty())
+            .expect("failed to open archive");
+
+        for (i, original_data) in file_data.iter().enumerate() {
+            let filename = format!("file_{:04}.txt", i);
+            let decompressed = reader.read_file(&filename).expect("decompression failed");
+            assert_eq!(
+                &decompressed, original_data,
+                "Data mismatch for {}",
+                filename
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_large_files() {
+    // Test with larger files
+    let file_data: Vec<Vec<u8>> = vec![
+        (0..100_000).map(|i| (i % 256) as u8).collect(),
+        (0..50_000).map(|i| ((i + 50) % 256) as u8).collect(),
+        (0..200_000).map(|i| ((i + 100) % 256) as u8).collect(),
+    ];
+
+    let entries: Vec<ArchiveEntry> = vec![
+        ArchiveEntry::new_file("large1.bin"),
+        ArchiveEntry::new_file("large2.bin"),
+        ArchiveEntry::new_file("large3.bin"),
+    ];
+
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(file_data.clone());
+
+        writer
+            .push_solid_entries_parallel(
+                entries,
+                &mut provider,
+                ParallelSolidConfig::high_latency(),
+            )
+            .expect("large files parallel compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Verify decompression
+    {
+        let mut reader = ArchiveReader::new(Cursor::new(archive_bytes.as_slice()), Password::empty())
+            .expect("failed to open archive");
+
+        for (filename, original_data) in
+            ["large1.bin", "large2.bin", "large3.bin"].iter().zip(file_data.iter())
+        {
+            let decompressed = reader.read_file(*filename).expect("decompression failed");
+            assert_eq!(
+                decompressed.len(),
+                original_data.len(),
+                "Size mismatch for {}",
+                filename
+            );
+            assert_eq!(
+                hash(&decompressed),
+                hash(original_data),
+                "Content mismatch for {}",
+                filename
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_parallel_solid_compression_with_config() {
+    let file_data: Vec<Vec<u8>> = vec![b"test1".to_vec(), b"test2".to_vec()];
+    let entries: Vec<ArchiveEntry> = vec![
+        ArchiveEntry::new_file("test1.txt"),
+        ArchiveEntry::new_file("test2.txt"),
+    ];
+
+    // Test high-latency config
+    let mut archive_bytes = Vec::new();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(file_data.clone());
+
+        writer
+            .push_solid_entries_parallel(entries.clone(), &mut provider, ParallelSolidConfig::high_latency())
+            .expect("high-latency config compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+    assert!(!archive_bytes.is_empty());
+
+    // Test low-latency config
+    archive_bytes.clear();
+    {
+        let mut writer = ArchiveWriter::new(Cursor::new(&mut archive_bytes)).unwrap();
+        let mut provider = VecParallelStreamProvider::new(file_data);
+
+        writer
+            .push_solid_entries_parallel(entries, &mut provider, ParallelSolidConfig::low_latency())
+            .expect("low-latency config compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+    assert!(!archive_bytes.is_empty());
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn test_streaming_writer_parallel_solid() {
+    let file_data: Vec<Vec<u8>> = vec![
+        b"Streaming file 1".to_vec(),
+        b"Streaming file 2".to_vec(),
+    ];
+    let entries: Vec<ArchiveEntry> = vec![
+        ArchiveEntry::new_file("stream1.txt"),
+        ArchiveEntry::new_file("stream2.txt"),
+    ];
+
+    let mut output = Vec::new();
+    {
+        let mut writer = StreamingArchiveWriter::new(&mut output).unwrap();
+        let mut provider = VecParallelStreamProvider::new(file_data.clone());
+
+        writer
+            .push_solid_entries_parallel(entries, &mut provider, ParallelSolidConfig::default())
+            .expect("streaming parallel compression failed");
+
+        writer.finish().expect("finish failed");
+    }
+
+    // Verify archive
+    assert!(!output.is_empty());
+    assert_eq!(&output[0..6], &[0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C]);
+
+    // Decompress and verify
+    {
+        let mut reader = ArchiveReader::new(Cursor::new(output.as_slice()), Password::empty())
+            .expect("failed to open archive");
+
+        let d1 = reader.read_file("stream1.txt").expect("decompression failed");
+        assert_eq!(d1, file_data[0]);
+
+        let d2 = reader.read_file("stream2.txt").expect("decompression failed");
+        assert_eq!(d2, file_data[1]);
+    }
+}
