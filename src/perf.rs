@@ -58,6 +58,9 @@ pub const XLARGE_BUFFER_SIZE: usize = 1024 * 1024;
 /// Hyper buffer size (4MB) - for extremely fast I/O (in-memory, fast networks)
 pub const HYPER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
+/// Maximum buffer size (16MB) - upper limit for buffer sizes
+pub const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024;
+
 /// Default chunk size for parallel compression (4MB)
 pub const DEFAULT_PARALLEL_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
 

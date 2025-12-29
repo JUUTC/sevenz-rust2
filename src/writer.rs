@@ -414,7 +414,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
                     // Use configurable buffer size for high-performance I/O
-                    let buffer_size = buffer_size.clamp(4096, 16 * 1024 * 1024);
+                    let buffer_size = buffer_size.clamp(crate::perf::SMALL_BUFFER_SIZE, crate::perf::MAX_BUFFER_SIZE);
                     let mut buf = vec![0u8; buffer_size];
                     loop {
                         match r.read(&mut buf) {

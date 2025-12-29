@@ -450,8 +450,11 @@ fn compress_with_parallel_config() {
     let temp_dir = tempdir().unwrap();
     let source = temp_dir.path().join("parallel_test.txt");
     
+    // Number of lines to generate - enough data to benefit from parallel compression
+    const TEST_LINE_COUNT: usize = 10000;
+    
     // Create a file with enough data to benefit from parallel compression
-    let content: String = (0..10000).map(|i| format!("Line {i}: test data for parallel compression\n")).collect();
+    let content: String = (0..TEST_LINE_COUNT).map(|i| format!("Line {i}: test data for parallel compression\n")).collect();
     std::fs::write(&source, &content).unwrap();
     
     let dest = temp_dir.path().join("parallel.7z");

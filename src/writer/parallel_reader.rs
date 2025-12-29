@@ -5,12 +5,21 @@
 //! in-memory caches, NVMe drives, or high-speed networks.
 
 use std::io::{self, Read};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 
 use crc32fast::Hasher;
 
-use crate::perf::{ParallelConfig, LARGE_BUFFER_SIZE};
+use crate::perf::{ParallelConfig, LARGE_BUFFER_SIZE, SMALL_BUFFER_SIZE, MAX_BUFFER_SIZE};
+
+/// Minimum prefetch count
+const MIN_PREFETCH_COUNT: usize = 1;
+
+/// Maximum prefetch count
+const MAX_PREFETCH_COUNT: usize = 16;
+
+/// Default prefetch count
+const DEFAULT_PREFETCH_COUNT: usize = 2;
 
 /// A reader that prefetches data from multiple sources in parallel.
 ///
@@ -28,19 +37,19 @@ impl<R: Read + Send + 'static> ParallelPrefetchReader<R> {
         Self {
             sources,
             buffer_size: LARGE_BUFFER_SIZE,
-            prefetch_count: 2,
+            prefetch_count: DEFAULT_PREFETCH_COUNT,
         }
     }
 
     /// Sets the buffer size for reading.
     pub fn with_buffer_size(mut self, buffer_size: usize) -> Self {
-        self.buffer_size = buffer_size.clamp(4096, 16 * 1024 * 1024);
+        self.buffer_size = buffer_size.clamp(SMALL_BUFFER_SIZE, MAX_BUFFER_SIZE);
         self
     }
 
     /// Sets the number of buffers to prefetch ahead.
     pub fn with_prefetch_count(mut self, count: usize) -> Self {
-        self.prefetch_count = count.clamp(1, 16);
+        self.prefetch_count = count.clamp(MIN_PREFETCH_COUNT, MAX_PREFETCH_COUNT);
         self
     }
 
@@ -49,7 +58,7 @@ impl<R: Read + Send + 'static> ParallelPrefetchReader<R> {
         Self {
             sources,
             buffer_size: config.buffer_size,
-            prefetch_count: 2,
+            prefetch_count: DEFAULT_PREFETCH_COUNT,
         }
     }
 
@@ -141,8 +150,7 @@ pub struct BackgroundReader {
 impl BackgroundReader {
     /// Creates a new background reader that reads from the given source.
     pub fn new<R: Read + Send + 'static>(mut source: R, buffer_size: usize) -> Self {
-        let (sender, receiver): (Sender<io::Result<Vec<u8>>>, Receiver<io::Result<Vec<u8>>>) =
-            mpsc::channel();
+        let (sender, receiver) = mpsc::channel();
 
         let handle = thread::spawn(move || {
             loop {
