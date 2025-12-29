@@ -122,6 +122,82 @@ writer.push_source_path("path/to/compress", | _ | true).expect("pack ok");
 writer.finish().expect("compress ok");
 ```
 
+#### High-Performance Parallel Compression
+
+For maximum compression throughput with fast I/O sources (in-memory cache, NVMe, high-speed networks),
+use parallel compression configuration:
+
+```rust
+use sevenz_rust2::*;
+use sevenz_rust2::perf::ParallelConfig;
+
+let mut writer = ArchiveWriter::create("dest.7z").expect("create writer ok");
+
+// Configure for maximum throughput - uses all CPU cores and large buffers
+writer.configure_parallel(ParallelConfig::max_throughput(), 6);
+
+// Or use balanced settings for a good compression/speed trade-off
+writer.configure_parallel(ParallelConfig::balanced(), 6);
+
+// Add files with high-performance buffer sizes
+use sevenz_rust2::perf::HYPER_BUFFER_SIZE;
+let entry = ArchiveEntry::from_path("path/to/file", "file.txt".to_string());
+writer.push_archive_entry_fast(entry, Some(std::fs::File::open("path/to/file").unwrap()), HYPER_BUFFER_SIZE).expect("ok");
+
+writer.finish().expect("compress ok");
+```
+
+Available configurations:
+- `ParallelConfig::max_throughput()` - Maximum I/O throughput for very fast sources (4MB buffers, 16MB chunks)
+- `ParallelConfig::balanced()` - Good balance between speed and memory (256KB buffers, 4MB chunks)
+- `ParallelConfig::low_latency()` - Lower latency for smaller files (64KB buffers, 1MB chunks)
+
+Custom configuration:
+```rust
+use sevenz_rust2::perf::ParallelConfig;
+
+let config = ParallelConfig::new()
+    .with_threads(8)           // Use 8 compression threads
+    .with_chunk_size(8 * 1024 * 1024)  // 8MB chunks
+    .with_buffer_size(1024 * 1024);     // 1MB I/O buffers
+
+let mut writer = ArchiveWriter::create("dest.7z").expect("create writer ok");
+writer.configure_parallel(config, 6);  // Level 6 compression
+```
+
+#### Smart Cache Prefetch Hints
+
+For callers with smart caches that want to pre-populate data just-in-time, use the `PrefetchQueue` to get hints about upcoming blobs:
+
+```rust
+use sevenz_rust2::perf::{PrefetchQueue, FnPrefetchCallback, PrefetchHint};
+
+// Create a callback to receive prefetch hints
+let callback = FnPrefetchCallback::new(|hints: &[PrefetchHint<String>]| {
+    for hint in hints {
+        println!("Upcoming blob: {} (lookahead: {})", hint.id, hint.lookahead_index);
+        // Pre-populate your cache here for hint.id
+    }
+});
+
+// Create a queue with your file list and lookahead count
+let files = vec!["file1.txt".to_string(), "file2.txt".to_string(), "file3.txt".to_string()];
+let mut queue = PrefetchQueue::new(files, 3, callback);
+
+// Process items - each call to next() triggers prefetch hints for upcoming items
+while let Some(filename) = queue.next() {
+    // The callback has already been notified about the next 3 files
+    // so your cache can pre-load them in parallel
+    println!("Processing: {}", filename);
+}
+```
+
+The `PrefetchQueue` supports:
+- Configurable lookahead count (1-16 items ahead)
+- `peek_upcoming()` to see what's coming without advancing
+- `remaining()` to check how many items are left
+- Works with any `Clone` type for blob identifiers
+
 ### WASM support
 
 WASM is supported, but you can't use the default features. We provide a "default_wasm" feature that contains
