@@ -2,6 +2,8 @@ mod counting_writer;
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 mod lazy_file_reader;
 mod pack_info;
+#[cfg(not(target_arch = "wasm32"))]
+mod parallel_reader;
 mod progress;
 #[cfg(not(target_arch = "wasm32"))]
 mod segmented_writer;
@@ -24,6 +26,8 @@ use crc32fast::Hasher;
 
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::parallel_reader::{BackgroundReader, BufferedChunkReader, ParallelPrefetchReader};
 pub use self::progress::{
     FnProgressCallback, NoopProgressCallback, ProgressCallback, ProgressInfo, ProgressResult,
 };
@@ -235,6 +239,34 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self
     }
 
+    /// Configures compression for maximum parallel throughput.
+    ///
+    /// This method sets up LZMA2 multi-threaded compression with settings optimized
+    /// for fast I/O sources like in-memory caches, NVMe drives, or high-speed networks.
+    ///
+    /// # Arguments
+    /// * `config` - Parallel configuration specifying threads, chunk size, etc.
+    /// * `level` - Compression level (0-9)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::*;
+    /// use sevenz_rust2::perf::ParallelConfig;
+    ///
+    /// let mut sz = ArchiveWriter::create("path/to/dest.7z").expect("create writer ok");
+    /// sz.configure_parallel(ParallelConfig::max_throughput(), 6);
+    /// // Add files...
+    /// sz.finish().expect("done");
+    /// ```
+    pub fn configure_parallel(
+        &mut self,
+        config: crate::perf::ParallelConfig,
+        level: u32,
+    ) -> &mut Self {
+        let lzma2_options = config.to_lzma2_options(level);
+        self.set_content_methods(vec![lzma2_options.into()])
+    }
+
     /// Non-solid compression - Adds an archive `entry` with data from `reader`.
     ///
     /// # Example
@@ -277,6 +309,113 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
                     // Use 64KB buffer for better I/O performance
                     let mut buf = vec![0u8; crate::perf::DEFAULT_BUFFER_SIZE];
+                    loop {
+                        match r.read(&mut buf) {
+                            Ok(n) => {
+                                if n == 0 {
+                                    break;
+                                }
+                                w.write_all(&buf[..n]).map_err(|e| {
+                                    Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                                })?;
+                            }
+                            Err(e) => {
+                                return Err(Error::io_msg(
+                                    e,
+                                    format!("Encode entry:{}", entry.name()),
+                                ));
+                            }
+                        }
+                    }
+                    w.flush()
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+                    w.write(&[])
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+
+                    (w.crc_value(), write_len)
+                };
+                let compressed_crc = compressed.crc_value();
+                entry.has_stream = true;
+                entry.size = size as u64;
+                entry.crc = crc as u64;
+                entry.has_crc = true;
+                entry.compressed_crc = compressed_crc as u64;
+                entry.compressed_size = compressed_len as u64;
+                self.pack_info
+                    .add_stream(compressed_len as u64, compressed_crc);
+
+                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
+                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
+                sizes.push(size as u64);
+
+                self.unpack_info
+                    .add(self.content_methods.clone(), sizes, crc);
+
+                self.files.push(entry);
+                return Ok(self.files.last().unwrap());
+            }
+        }
+        entry.has_stream = false;
+        entry.size = 0;
+        entry.compressed_size = 0;
+        entry.has_crc = false;
+        self.files.push(entry);
+        Ok(self.files.last().unwrap())
+    }
+
+    /// High-performance non-solid compression for fast I/O sources.
+    ///
+    /// This method is optimized for maximum throughput when reading from fast sources
+    /// like in-memory caches, NVMe drives, or high-speed networks. It uses larger buffers
+    /// and can optionally use background reading to overlap I/O with compression.
+    ///
+    /// # Arguments
+    /// * `entry` - The archive entry metadata
+    /// * `reader` - Optional reader providing the entry's data
+    /// * `buffer_size` - Size of the I/O buffer (use `perf::HYPER_BUFFER_SIZE` for max throughput)
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::{fs::File, path::Path};
+    /// use sevenz_rust2::*;
+    /// use sevenz_rust2::perf::HYPER_BUFFER_SIZE;
+    ///
+    /// let mut sz = ArchiveWriter::create("path/to/dest.7z").expect("create writer ok");
+    /// let src = Path::new("path/to/source.txt");
+    /// let entry = sz
+    ///     .push_archive_entry_fast(
+    ///         ArchiveEntry::from_path(&src, "source.txt".to_string()),
+    ///         Some(File::open(src).unwrap()),
+    ///         HYPER_BUFFER_SIZE,
+    ///     )
+    ///     .expect("ok");
+    /// sz.finish().expect("done");
+    /// ```
+    pub fn push_archive_entry_fast<R: Read>(
+        &mut self,
+        mut entry: ArchiveEntry,
+        reader: Option<R>,
+        buffer_size: usize,
+    ) -> Result<&ArchiveEntry> {
+        if !entry.is_directory {
+            if let Some(mut r) = reader {
+                let mut compressed_len = 0;
+                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+
+                let mut more_sizes: Vec<Rc<Cell<usize>>> =
+                    Vec::with_capacity(self.content_methods.len() - 1);
+
+                let (crc, size) = {
+                    let mut w = Self::create_writer(
+                        &self.content_methods,
+                        &mut compressed,
+                        &mut more_sizes,
+                    )?;
+                    let mut write_len = 0;
+                    let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
+                    // Use configurable buffer size for high-performance I/O
+                    let buffer_size = buffer_size.clamp(4096, 16 * 1024 * 1024);
+                    let mut buf = vec![0u8; buffer_size];
                     loop {
                         match r.read(&mut buf) {
                             Ok(n) => {

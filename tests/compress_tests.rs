@@ -441,3 +441,92 @@ fn compress_with_comment() {
         "test content"
     );
 }
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn compress_with_parallel_config() {
+    use sevenz_rust2::perf::ParallelConfig;
+
+    let temp_dir = tempdir().unwrap();
+    let source = temp_dir.path().join("parallel_test.txt");
+    
+    // Create a file with enough data to benefit from parallel compression
+    let content: String = (0..10000).map(|i| format!("Line {i}: test data for parallel compression\n")).collect();
+    std::fs::write(&source, &content).unwrap();
+    
+    let dest = temp_dir.path().join("parallel.7z");
+    
+    {
+        let mut archive = ArchiveWriter::create(&dest).unwrap();
+        // Use parallel configuration with max throughput
+        archive.configure_parallel(ParallelConfig::max_throughput(), 6);
+        let entry = ArchiveEntry::from_path(&source, "parallel_test.txt".to_string());
+        archive.push_archive_entry(entry, Some(File::open(&source).unwrap())).unwrap();
+        archive.finish().unwrap();
+    }
+    
+    // Verify decompression
+    let decompress_dest = temp_dir.path().join("decompress");
+    decompress_file(&dest, &decompress_dest).expect("decompress ok");
+    let decompress_file = decompress_dest.join("parallel_test.txt");
+    assert!(decompress_file.exists());
+    assert_eq!(std::fs::read_to_string(&decompress_file).unwrap(), content);
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn compress_with_fast_entry() {
+    use sevenz_rust2::perf::HYPER_BUFFER_SIZE;
+
+    let temp_dir = tempdir().unwrap();
+    let source = temp_dir.path().join("fast_test.txt");
+    
+    // Create test data
+    let content = "Fast entry compression test data\n".repeat(1000);
+    std::fs::write(&source, &content).unwrap();
+    
+    let dest = temp_dir.path().join("fast.7z");
+    
+    {
+        let mut archive = ArchiveWriter::create(&dest).unwrap();
+        let entry = ArchiveEntry::from_path(&source, "fast_test.txt".to_string());
+        archive.push_archive_entry_fast(entry, Some(File::open(&source).unwrap()), HYPER_BUFFER_SIZE).unwrap();
+        archive.finish().unwrap();
+    }
+    
+    // Verify decompression
+    let decompress_dest = temp_dir.path().join("decompress");
+    decompress_file(&dest, &decompress_dest).expect("decompress ok");
+    let decompress_file = decompress_dest.join("fast_test.txt");
+    assert!(decompress_file.exists());
+    assert_eq!(std::fs::read_to_string(&decompress_file).unwrap(), content);
+}
+
+#[cfg(all(feature = "compress", feature = "util"))]
+#[test]
+fn compress_with_parallel_config_balanced() {
+    use sevenz_rust2::perf::ParallelConfig;
+
+    let temp_dir = tempdir().unwrap();
+    let source = temp_dir.path().join("balanced_test.txt");
+    
+    let content = "Balanced parallel compression test\n".repeat(500);
+    std::fs::write(&source, &content).unwrap();
+    
+    let dest = temp_dir.path().join("balanced.7z");
+    
+    {
+        let mut archive = ArchiveWriter::create(&dest).unwrap();
+        archive.configure_parallel(ParallelConfig::balanced(), 5);
+        let entry = ArchiveEntry::from_path(&source, "balanced_test.txt".to_string());
+        archive.push_archive_entry(entry, Some(File::open(&source).unwrap())).unwrap();
+        archive.finish().unwrap();
+    }
+    
+    // Verify decompression
+    let decompress_dest = temp_dir.path().join("decompress");
+    decompress_file(&dest, &decompress_dest).expect("decompress ok");
+    let decompress_file = decompress_dest.join("balanced_test.txt");
+    assert!(decompress_file.exists());
+    assert_eq!(std::fs::read_to_string(&decompress_file).unwrap(), content);
+}
