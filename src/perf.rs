@@ -312,6 +312,10 @@ pub fn buffered_copy_with_crc<R: Read, W: Write>(
 /// Default lookahead count for prefetch hints
 pub const DEFAULT_LOOKAHEAD_COUNT: usize = 4;
 
+/// Maximum lookahead count for prefetch hints.
+/// Set high to support large-scale workloads with millions of files.
+pub const MAX_LOOKAHEAD_COUNT: usize = 10000;
+
 /// A hint about an upcoming blob/entry that will be requested.
 ///
 /// This allows callers with smart caches to pre-populate data just-in-time,
@@ -459,10 +463,15 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
     ///
     /// # Arguments
     /// * `items` - The items to process in order.
-    /// * `lookahead_count` - How many items ahead to hint (1-16).
+    /// * `lookahead_count` - How many items ahead to hint (1 to MAX_LOOKAHEAD_COUNT).
     /// * `callback` - The callback to receive prefetch hints.
+    ///
+    /// # Order Knowledge
+    /// The system knows the order as soon as you provide the `items` vector.
+    /// For millions of files, you can provide them all upfront, or use
+    /// `extend_items()` to add more items dynamically as you discover them.
     pub fn new(items: Vec<T>, lookahead_count: usize, callback: C) -> Self {
-        let lookahead_count = lookahead_count.clamp(1, 16);
+        let lookahead_count = lookahead_count.clamp(1, MAX_LOOKAHEAD_COUNT);
         let mut queue = Self {
             items,
             current_index: 0,
@@ -487,6 +496,33 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
     /// Returns the total number of items.
     pub fn total_count(&self) -> usize {
         self.items.len()
+    }
+
+    /// Returns the current lookahead count.
+    pub fn lookahead_count(&self) -> usize {
+        self.lookahead_count
+    }
+
+    /// Sets a new lookahead count.
+    ///
+    /// The value is clamped between 1 and MAX_LOOKAHEAD_COUNT.
+    /// This can be useful to dynamically adjust prefetch depth based on
+    /// cache capacity or network conditions.
+    pub fn set_lookahead_count(&mut self, count: usize) {
+        self.lookahead_count = count.clamp(1, MAX_LOOKAHEAD_COUNT);
+        // Re-send hints with the new lookahead count
+        self.send_hints();
+    }
+
+    /// Extends the queue with additional items.
+    ///
+    /// This is useful when working with millions of files where you may
+    /// discover items incrementally (e.g., from directory traversal) rather
+    /// than having all items upfront.
+    pub fn extend_items(&mut self, items: impl IntoIterator<Item = T>) {
+        self.items.extend(items);
+        // Re-send hints to include newly added items if within lookahead range
+        self.send_hints();
     }
 
     /// Gets the next item and sends prefetch hints for upcoming items.
@@ -721,5 +757,80 @@ mod tests {
         let hints = vec![PrefetchHint::new("test", 0)];
         // Should not panic
         callback.on_prefetch_hint(&hints);
+    }
+
+    #[test]
+    fn test_prefetch_queue_large_lookahead() {
+        // Test with a large lookahead count for millions-of-files scenarios
+        let items: Vec<String> = (0..100).map(|i| format!("file{}.txt", i)).collect();
+        
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let received_count: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
+        let count_clone = received_count.clone();
+
+        let callback = FnPrefetchCallback::new(move |hints: &[PrefetchHint<String>]| {
+            *count_clone.borrow_mut() = hints.len();
+        });
+
+        // Request 50 items lookahead
+        let mut queue = PrefetchQueue::new(items, 50, callback);
+        
+        // Initial hints should include first 50 items
+        assert_eq!(*received_count.borrow(), 50);
+        assert_eq!(queue.lookahead_count(), 50);
+
+        // Advance through some items
+        for _ in 0..10 {
+            queue.next();
+        }
+        
+        // Still 50 items lookahead (items 10-59)
+        assert_eq!(*received_count.borrow(), 50);
+    }
+
+    #[test]
+    fn test_prefetch_queue_extend_items() {
+        let items = vec!["a".to_string(), "b".to_string()];
+        let mut queue = PrefetchQueue::new(items, 10, NoopPrefetchCallback);
+        
+        assert_eq!(queue.total_count(), 2);
+        
+        // Extend with more items
+        queue.extend_items(vec!["c".to_string(), "d".to_string()]);
+        assert_eq!(queue.total_count(), 4);
+        
+        // Verify all items are accessible
+        assert_eq!(queue.next(), Some("a".to_string()));
+        assert_eq!(queue.next(), Some("b".to_string()));
+        assert_eq!(queue.next(), Some("c".to_string()));
+        assert_eq!(queue.next(), Some("d".to_string()));
+        assert_eq!(queue.next(), None);
+    }
+
+    #[test]
+    fn test_prefetch_queue_set_lookahead() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let received_counts: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let counts_clone = received_counts.clone();
+
+        let callback = FnPrefetchCallback::new(move |hints: &[PrefetchHint<String>]| {
+            counts_clone.borrow_mut().push(hints.len());
+        });
+
+        let items: Vec<String> = (0..20).map(|i| format!("file{}.txt", i)).collect();
+        let mut queue = PrefetchQueue::new(items, 5, callback);
+        
+        // Initial lookahead is 5
+        assert_eq!(queue.lookahead_count(), 5);
+        assert_eq!(*received_counts.borrow().last().unwrap(), 5);
+        
+        // Increase lookahead to 10
+        queue.set_lookahead_count(10);
+        assert_eq!(queue.lookahead_count(), 10);
+        assert_eq!(*received_counts.borrow().last().unwrap(), 10);
     }
 }
