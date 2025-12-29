@@ -526,7 +526,19 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
     }
 
     /// Gets the next item and sends prefetch hints for upcoming items.
+    ///
+    /// Note: This method is intentionally not implementing `Iterator` because
+    /// `PrefetchQueue` has additional state (callback) and behavior (sending hints)
+    /// that don't fit the standard iterator pattern. Use `advance()` for clearer semantics.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Option<T> {
+        self.advance()
+    }
+
+    /// Advances to the next item and sends prefetch hints for upcoming items.
+    ///
+    /// This is the preferred method for iterating through the queue.
+    pub fn advance(&mut self) -> Option<T> {
         if self.current_index >= self.items.len() {
             return None;
         }
