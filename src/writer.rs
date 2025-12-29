@@ -796,6 +796,17 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         }
 
         let entry_count = entries.len();
+        
+        // Early validation: check if provider has enough streams
+        if let Some(stream_count) = provider.stream_count() {
+            if stream_count < entry_count {
+                return Err(Error::other(format!(
+                    "Provider has {} streams but {} entries were provided",
+                    stream_count, entry_count
+                )));
+            }
+        }
+        
         let batch_size = config.batch_size.min(provider.parallelism()).max(1);
         let buffer_size = config.buffer_size;
 
