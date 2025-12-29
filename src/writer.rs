@@ -828,6 +828,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 provider.prepare_streams(&indices);
 
                 // Process each entry in order
+                // Note: We need the raw index for both array indexing and provider API calls
+                #[allow(clippy::needless_range_loop)]
                 for idx in current_idx..prefetch_end {
                     let entry = &entries[idx];
 

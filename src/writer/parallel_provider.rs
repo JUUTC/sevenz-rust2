@@ -107,7 +107,7 @@ pub trait ParallelStreamProvider {
     ///
     /// # Arguments
     /// * `indices` - File indices that will be needed, in the order they will be requested.
-    ///               The provider should start fetching all of them in parallel.
+    ///   The provider should start fetching all of them in parallel.
     ///
     /// # Notes
     /// - This method may be called multiple times as compression progresses.
