@@ -456,6 +456,8 @@ pub struct PrefetchQueue<T: Clone, C: PrefetchCallback<T>> {
     current_index: usize,
     lookahead_count: usize,
     callback: C,
+    /// Reusable buffer for prefetch hints to avoid allocations on each call
+    hints_buffer: Vec<PrefetchHint<T>>,
 }
 
 impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
@@ -477,6 +479,7 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
             current_index: 0,
             lookahead_count,
             callback,
+            hints_buffer: Vec::with_capacity(lookahead_count),
         };
         // Send initial prefetch hints
         queue.send_hints();
@@ -510,6 +513,10 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
     /// cache capacity or network conditions.
     pub fn set_lookahead_count(&mut self, count: usize) {
         self.lookahead_count = count.clamp(1, MAX_LOOKAHEAD_COUNT);
+        // Ensure buffer has enough capacity
+        if self.hints_buffer.capacity() < self.lookahead_count {
+            self.hints_buffer.reserve(self.lookahead_count - self.hints_buffer.capacity());
+        }
         // Re-send hints with the new lookahead count
         self.send_hints();
     }
@@ -552,6 +559,44 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
         Some(item)
     }
 
+    /// Advances to the next item by index, avoiding cloning.
+    ///
+    /// Returns the index of the current item (before advancing) and sends prefetch hints.
+    /// Use `get(index)` to access the item by reference if cloning is expensive.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use sevenz_rust2::perf::{PrefetchQueue, NoopPrefetchCallback};
+    ///
+    /// let items = vec!["large_item1".to_string(), "large_item2".to_string()];
+    /// let mut queue = PrefetchQueue::new(items, 2, NoopPrefetchCallback);
+    ///
+    /// while let Some(index) = queue.advance_index() {
+    ///     let item = queue.get(index).unwrap();
+    ///     println!("Processing item at index {}: {}", index, item);
+    /// }
+    /// ```
+    pub fn advance_index(&mut self) -> Option<usize> {
+        if self.current_index >= self.items.len() {
+            return None;
+        }
+
+        let index = self.current_index;
+        self.current_index += 1;
+        
+        // Send hints for the next items
+        self.send_hints();
+        
+        Some(index)
+    }
+
+    /// Gets a reference to the item at the given index.
+    ///
+    /// Use this with `advance_index()` to avoid cloning large items.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.items.get(index)
+    }
+
     /// Peeks at upcoming items without advancing the queue.
     ///
     /// Returns up to `count` upcoming items starting from the current position.
@@ -569,13 +614,13 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
             return;
         }
 
-        let hints: Vec<PrefetchHint<T>> = self.items[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, item)| PrefetchHint::new(item.clone(), i))
-            .collect();
+        // Reuse buffer to avoid allocation
+        self.hints_buffer.clear();
+        for (i, item) in self.items[start..end].iter().enumerate() {
+            self.hints_buffer.push(PrefetchHint::new(item.clone(), i));
+        }
 
-        self.callback.on_prefetch_hint(&hints);
+        self.callback.on_prefetch_hint(&self.hints_buffer);
     }
 }
 
@@ -844,5 +889,33 @@ mod tests {
         queue.set_lookahead_count(10);
         assert_eq!(queue.lookahead_count(), 10);
         assert_eq!(*received_counts.borrow().last().unwrap(), 10);
+    }
+
+    #[test]
+    fn test_prefetch_queue_advance_index() {
+        let items = vec!["large_item_a".to_string(), "large_item_b".to_string(), "large_item_c".to_string()];
+        let mut queue = PrefetchQueue::new(items, 2, NoopPrefetchCallback);
+        
+        // Use advance_index to get index without cloning
+        let index = queue.advance_index().unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(queue.get(index).unwrap(), "large_item_a");
+        
+        let index = queue.advance_index().unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(queue.get(index).unwrap(), "large_item_b");
+        
+        let index = queue.advance_index().unwrap();
+        assert_eq!(index, 2);
+        assert_eq!(queue.get(index).unwrap(), "large_item_c");
+        
+        // No more items
+        assert!(queue.advance_index().is_none());
+        
+        // Can still access items by index after iteration
+        assert_eq!(queue.get(0).unwrap(), "large_item_a");
+        assert_eq!(queue.get(1).unwrap(), "large_item_b");
+        assert_eq!(queue.get(2).unwrap(), "large_item_c");
+        assert!(queue.get(3).is_none());
     }
 }
