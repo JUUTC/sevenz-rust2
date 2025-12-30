@@ -525,8 +525,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
                     
-                    // Small stack-allocated buffer for tiny files (4KB)
-                    let mut buf = [0u8; 4096];
+                    // Small stack-allocated buffer for tiny files
+                    let mut buf = [0u8; crate::perf::SMALL_BUFFER_SIZE];
                     let mut total = 0usize;
                     
                     loop {
