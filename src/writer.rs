@@ -97,6 +97,10 @@ macro_rules! write_times {
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// Maximum number of coders to use stack allocation for in collect_sizes.
+/// Most compressions use 1-3 coders (LZMA2, BCJ+LZMA2, Delta+BCJ+LZMA2).
+const MAX_STACK_CODERS: usize = 4;
+
 /// Writes a 7z archive file.
 pub struct ArchiveWriter<W: Write> {
     output: W,
@@ -1195,8 +1199,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let total_count = more_sizes.len() + 1;
         
         // Fast path: most compressions use 1-3 coders (LZMA2, or BCJ+LZMA2, or Delta+BCJ+LZMA2)
-        if total_count <= 4 {
-            let mut sizes_array = [0u64; 4];
+        if total_count <= MAX_STACK_CODERS {
+            let mut sizes_array = [0u64; MAX_STACK_CODERS];
             for (i, s) in more_sizes.iter().enumerate() {
                 sizes_array[i] = s.get() as u64;
             }
