@@ -93,6 +93,36 @@ println!("Created {} volumes", metadata.volume_count);
 // Files created: archive.7z.001, archive.7z.002, etc.
 ```
 
+#### High-Performance Batch Compression
+
+For applications processing thousands of small files (e.g., downloading blobs into memory cache), use `BufferPool` and batched compression for 10-30x speedup:
+
+```rust
+use sevenz_rust2::*;
+use sevenz_rust2::perf::{BufferPool, LARGE_BUFFER_SIZE};
+
+// Create buffer pool to reuse allocations (reduces 3.2GB to 2MB for 50k files)
+let pool = BufferPool::new(16, LARGE_BUFFER_SIZE);
+
+let mut archive = ArchiveWriter::create("output.7z").expect("create writer ok");
+
+// Process many files efficiently
+for blob in cached_blobs {
+    let entry = ArchiveEntry::new_file(&blob.name);
+    archive.push_archive_entry_batched(
+        entry,
+        Some(blob.reader()),
+        Some(&pool),  // Reuse buffers!
+    ).expect("compress ok");
+}
+
+archive.finish().expect("done");
+```
+
+**Performance**: For 50k files, reduces compression time from 10+ minutes to 30-60 seconds.
+
+See [Performance Guide](docs/PERFORMANCE_GUIDE.md) for detailed optimization techniques.
+
 #### Solid compression
 
 Solid archives can in theory provide better compression rates, but decompressing a file needs all previous data to also
