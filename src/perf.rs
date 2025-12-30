@@ -41,6 +41,7 @@
 
 use std::io::{Read, Write};
 use std::num::NonZeroUsize;
+use std::cell::RefCell;
 use crc32fast::Hasher;
 
 /// Small buffer size (4KB) - for memory-constrained environments
@@ -242,6 +243,145 @@ impl BufferConfig {
     /// Uses 4KB buffers to minimize memory usage.
     pub fn low_memory() -> Self {
         Self::new(SMALL_BUFFER_SIZE)
+    }
+}
+
+/// A buffer pool for reusing allocations across multiple compression operations.
+///
+/// When processing many files (e.g., 50k+ small blobs), allocating a new buffer
+/// for each file creates significant overhead. A buffer pool eliminates this by
+/// reusing buffers.
+///
+/// # Performance Impact
+///
+/// For 50k files with 64KB buffers:
+/// - Without pool: 50,000 allocations × 64KB = 3.2GB allocated
+/// - With pool (8 buffers): 8 allocations × 64KB = 512KB allocated
+///
+/// This reduces allocation overhead by ~99% and improves cache locality.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::{BufferPool, DEFAULT_BUFFER_SIZE};
+///
+/// // Create a pool with 8 buffers of 64KB each
+/// let pool = BufferPool::new(8, DEFAULT_BUFFER_SIZE);
+///
+/// // Get a buffer from the pool
+/// let mut buffer = pool.get();
+/// assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+///
+/// // Use the buffer...
+/// buffer[0] = 42;
+///
+/// // When `buffer` is dropped, it automatically returns to the pool
+/// drop(buffer);
+///
+/// // Get it again (reuses the same allocation)
+/// let buffer2 = pool.get();
+/// assert_eq!(buffer2.len(), DEFAULT_BUFFER_SIZE);
+/// ```
+#[derive(Clone)]
+pub struct BufferPool {
+    buffers: std::rc::Rc<RefCell<Vec<Vec<u8>>>>,
+    buffer_size: usize,
+    max_buffers: usize,
+}
+
+impl BufferPool {
+    /// Creates a new buffer pool.
+    ///
+    /// # Arguments
+    /// * `max_buffers` - Maximum number of buffers to keep in the pool (1-256)
+    /// * `buffer_size` - Size of each buffer in bytes (clamped to 4KB-16MB)
+    pub fn new(max_buffers: usize, buffer_size: usize) -> Self {
+        let max_buffers = max_buffers.clamp(1, 256);
+        let buffer_size = buffer_size.clamp(SMALL_BUFFER_SIZE, MAX_BUFFER_SIZE);
+        
+        Self {
+            buffers: std::rc::Rc::new(RefCell::new(Vec::with_capacity(max_buffers))),
+            buffer_size,
+            max_buffers,
+        }
+    }
+
+    /// Gets a buffer from the pool, or allocates a new one if the pool is empty.
+    ///
+    /// The returned buffer is automatically returned to the pool when dropped.
+    #[inline]
+    pub fn get(&self) -> PooledBuffer {
+        let mut buffers = self.buffers.borrow_mut();
+        let buffer = buffers.pop().unwrap_or_else(|| vec![0u8; self.buffer_size]);
+        
+        PooledBuffer {
+            buffer: Some(buffer),
+            pool: self.buffers.clone(),
+            max_buffers: self.max_buffers,
+        }
+    }
+
+    /// Returns the buffer size used by this pool.
+    pub fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
+    /// Returns the current number of buffers in the pool.
+    pub fn available_count(&self) -> usize {
+        self.buffers.borrow().len()
+    }
+}
+
+impl Default for BufferPool {
+    fn default() -> Self {
+        Self::new(8, DEFAULT_BUFFER_SIZE)
+    }
+}
+
+/// A buffer borrowed from a pool that automatically returns itself when dropped.
+///
+/// This type implements `Deref` and `DerefMut` to `Vec<u8>`, so it can be used
+/// like a regular Vec<u8>.
+pub struct PooledBuffer {
+    buffer: Option<Vec<u8>>,
+    pool: std::rc::Rc<RefCell<Vec<Vec<u8>>>>,
+    max_buffers: usize,
+}
+
+impl PooledBuffer {
+    /// Converts this pooled buffer into an owned Vec<u8>, preventing it from
+    /// being returned to the pool.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        self.buffer.take().unwrap()
+    }
+}
+
+impl std::ops::Deref for PooledBuffer {
+    type Target = Vec<u8>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.buffer.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for PooledBuffer {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer.as_mut().unwrap()
+    }
+}
+
+impl Drop for PooledBuffer {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            let mut buffers = self.pool.borrow_mut();
+            // Only return to pool if not at capacity
+            if buffers.len() < self.max_buffers {
+                buffers.push(buffer);
+            }
+            // Otherwise, let it drop (deallocate)
+        }
     }
 }
 
@@ -917,5 +1057,112 @@ mod tests {
         assert_eq!(queue.get(1).unwrap(), "large_item_b");
         assert_eq!(queue.get(2).unwrap(), "large_item_c");
         assert!(queue.get(3).is_none());
+    }
+
+    #[test]
+    fn test_buffer_pool_basic() {
+        let pool = BufferPool::new(4, DEFAULT_BUFFER_SIZE);
+        
+        // Get a buffer
+        let mut buffer = pool.get();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+        buffer[0] = 42;
+        
+        // Drop it
+        drop(buffer);
+        
+        // Pool should have 1 buffer now
+        assert_eq!(pool.available_count(), 1);
+        
+        // Get it again - should reuse
+        let buffer2 = pool.get();
+        assert_eq!(buffer2.len(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(buffer2[0], 42); // Previous data still there
+    }
+
+    #[test]
+    fn test_buffer_pool_multiple() {
+        let pool = BufferPool::new(3, LARGE_BUFFER_SIZE);
+        
+        // Get 3 buffers
+        let b1 = pool.get();
+        let b2 = pool.get();
+        let b3 = pool.get();
+        
+        assert_eq!(pool.available_count(), 0);
+        
+        // Drop them
+        drop(b1);
+        assert_eq!(pool.available_count(), 1);
+        drop(b2);
+        assert_eq!(pool.available_count(), 2);
+        drop(b3);
+        assert_eq!(pool.available_count(), 3);
+    }
+
+    #[test]
+    fn test_buffer_pool_max_capacity() {
+        let pool = BufferPool::new(2, DEFAULT_BUFFER_SIZE);
+        
+        // Get and drop 3 buffers
+        let b1 = pool.get();
+        let b2 = pool.get();
+        let b3 = pool.get();
+        
+        drop(b1);
+        drop(b2);
+        drop(b3);
+        
+        // Pool should only keep 2 (max capacity)
+        assert_eq!(pool.available_count(), 2);
+    }
+
+    #[test]
+    fn test_buffer_pool_default() {
+        let pool = BufferPool::default();
+        assert_eq!(pool.buffer_size(), DEFAULT_BUFFER_SIZE);
+        
+        let buffer = pool.get();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_pooled_buffer_into_vec() {
+        let pool = BufferPool::new(2, DEFAULT_BUFFER_SIZE);
+        let mut buffer = pool.get();
+        buffer[0] = 99;
+        
+        // Convert to owned Vec
+        let vec = buffer.into_vec();
+        assert_eq!(vec.len(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(vec[0], 99);
+        
+        // Pool should not have received it back
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    #[test]
+    fn test_buffer_pool_clamping() {
+        // Test buffer count clamping
+        let pool = BufferPool::new(0, DEFAULT_BUFFER_SIZE);
+        let buffer = pool.get();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+        drop(buffer);
+        assert_eq!(pool.available_count(), 1); // Min 1 buffer
+        
+        let pool = BufferPool::new(1000, DEFAULT_BUFFER_SIZE);
+        let buffer = pool.get();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+        drop(buffer);
+        assert!(pool.available_count() <= 256); // Max 256 buffers
+        
+        // Test buffer size clamping
+        let pool = BufferPool::new(2, 100);
+        let buffer = pool.get();
+        assert_eq!(buffer.len(), SMALL_BUFFER_SIZE); // Clamped to min 4KB
+        
+        let pool = BufferPool::new(2, 100 * 1024 * 1024);
+        let buffer = pool.get();
+        assert_eq!(buffer.len(), MAX_BUFFER_SIZE); // Clamped to max 16MB
     }
 }
