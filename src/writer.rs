@@ -26,6 +26,10 @@ use std::{fs::File, path::Path};
 pub(crate) use counting_writer::CountingWriter;
 use crc32fast::Hasher;
 
+/// Maximum number of coders for stack allocation optimization.
+/// Common configurations: LZMA2 (1), BCJ+LZMA2 (2), Delta+BCJ+LZMA2 (3).
+const MAX_STACK_CODERS: usize = 4;
+
 #[cfg(all(feature = "util", not(target_arch = "wasm32")))]
 pub(crate) use self::lazy_file_reader::LazyFileReader;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1195,8 +1199,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         let total_count = more_sizes.len() + 1;
         
         // Fast path: most compressions use 1-3 coders (LZMA2, or BCJ+LZMA2, or Delta+BCJ+LZMA2)
-        if total_count <= 4 {
-            let mut sizes_array = [0u64; 4];
+        if total_count <= MAX_STACK_CODERS {
+            let mut sizes_array = [0u64; MAX_STACK_CODERS];
             for (i, s) in more_sizes.iter().enumerate() {
                 sizes_array[i] = s.get() as u64;
             }

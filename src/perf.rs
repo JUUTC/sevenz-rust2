@@ -252,6 +252,13 @@ impl BufferConfig {
 /// for each file creates significant overhead. A buffer pool eliminates this by
 /// reusing buffers.
 ///
+/// # Thread Safety
+///
+/// This pool uses `Rc<RefCell<_>>` internally and is **not thread-safe**.
+/// It is designed for single-threaded batch processing where files are
+/// compressed sequentially. For multi-threaded scenarios, create separate
+/// pools per thread or use `Arc<Mutex<_>>` based synchronization.
+///
 /// # Performance Impact
 ///
 /// For 50k files with 64KB buffers:
