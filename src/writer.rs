@@ -351,9 +351,8 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 self.pack_info
                     .add_stream(compressed_len as u64, compressed_crc);
 
-                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-                sizes.push(size as u64);
+                let sizes = Self::collect_sizes(&more_sizes, size as u64);
+
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
@@ -458,9 +457,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 self.pack_info
                     .add_stream(compressed_len as u64, compressed_crc);
 
-                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-                sizes.push(size as u64);
+                let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
@@ -603,9 +600,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 self.pack_info
                     .add_stream(compressed_len as u64, compressed_crc);
 
-                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-                sizes.push(size as u64);
+                let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
@@ -747,9 +742,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                 self.pack_info
                     .add_stream(compressed_len as u64, compressed_crc);
 
-                let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-                sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-                sizes.push(size as u64);
+                let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
@@ -853,9 +846,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.pack_info
             .add_stream(compressed_len as u64, compressed_crc);
 
-        let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-        sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-        sizes.push(size as u64);
+        let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
         self.unpack_info.add_multiple(
             content_methods.clone(),
@@ -1057,9 +1048,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         self.pack_info
             .add_stream(compressed_len as u64, compressed_crc);
 
-        let mut sizes = Vec::with_capacity(more_sizes.len() + 1);
-        sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
-        sizes.push(total_size as u64);
+        let sizes = Self::collect_sizes(&more_sizes, total_size as u64);
 
         self.unpack_info.add_multiple(
             content_methods.clone(),
@@ -1093,6 +1082,29 @@ impl<W: Write + Seek> ArchiveWriter<W> {
             first = false;
         }
         Ok(encoder)
+    }
+
+    /// Helper to collect sizes from more_sizes efficiently.
+    /// Uses stack allocation for common case (1-4 coders), heap for rare cases.
+    #[inline]
+    fn collect_sizes(more_sizes: &[Rc<Cell<usize>>], final_size: u64) -> Vec<u64> {
+        let total_count = more_sizes.len() + 1;
+        
+        // Fast path: most compressions use 1-3 coders (LZMA2, or BCJ+LZMA2, or Delta+BCJ+LZMA2)
+        if total_count <= 4 {
+            let mut sizes_array = [0u64; 4];
+            for (i, s) in more_sizes.iter().enumerate() {
+                sizes_array[i] = s.get() as u64;
+            }
+            sizes_array[total_count - 1] = final_size;
+            sizes_array[..total_count].to_vec()
+        } else {
+            // Slow path: many coders (rare, complex filter chains)
+            let mut sizes = Vec::with_capacity(total_count);
+            sizes.extend(more_sizes.iter().map(|s| s.get() as u64));
+            sizes.push(final_size);
+            sizes
+        }
     }
 
     /// Finishes the compression.
