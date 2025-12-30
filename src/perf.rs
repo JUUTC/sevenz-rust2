@@ -763,6 +763,7 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
         for i in 0..(end - start) {
             // Clone only when creating hint - unavoidable for callback API
             // but we minimize by only cloning what's needed
+            // Note: `i` is the relative position in the lookahead window (0 = next item)
             self.hints_buffer.push(PrefetchHint::new(self.items[start + i].clone(), i));
         }
 

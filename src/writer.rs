@@ -697,54 +697,37 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     let mut write_len = 0;
                     let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
                     
+                    // Helper closure to read from source and write to compressor
+                    let mut read_and_compress = |buf: &mut [u8]| -> Result<usize> {
+                        let mut total = 0usize;
+                        loop {
+                            match r.read(buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    w.write_all(&buf[..n]).map_err(|e| {
+                                        Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                                    })?;
+                                    total += n;
+                                }
+                                Err(e) => {
+                                    return Err(Error::io_msg(
+                                        e,
+                                        format!("Encode entry:{}", entry.name()),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(total)
+                    };
+                    
                     // Use buffer from pool if available, otherwise allocate
                     let bytes_copied = if let Some(pool) = buffer_pool {
                         let mut buf = pool.get();
-                        let mut total = 0usize;
-                        loop {
-                            match r.read(&mut *buf) {
-                                Ok(n) => {
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    w.write_all(&buf[..n]).map_err(|e| {
-                                        Error::io_msg(e, format!("Encode entry:{}", entry.name()))
-                                    })?;
-                                    total += n;
-                                }
-                                Err(e) => {
-                                    return Err(Error::io_msg(
-                                        e,
-                                        format!("Encode entry:{}", entry.name()),
-                                    ));
-                                }
-                            }
-                        }
-                        total
+                        read_and_compress(&mut *buf)?
                     } else {
                         // Fallback to standard buffer allocation
                         let mut buf = vec![0u8; crate::perf::LARGE_BUFFER_SIZE];
-                        let mut total = 0usize;
-                        loop {
-                            match r.read(&mut buf) {
-                                Ok(n) => {
-                                    if n == 0 {
-                                        break;
-                                    }
-                                    w.write_all(&buf[..n]).map_err(|e| {
-                                        Error::io_msg(e, format!("Encode entry:{}", entry.name()))
-                                    })?;
-                                    total += n;
-                                }
-                                Err(e) => {
-                                    return Err(Error::io_msg(
-                                        e,
-                                        format!("Encode entry:{}", entry.name()),
-                                    ));
-                                }
-                            }
-                        }
-                        total
+                        read_and_compress(&mut buf)?
                     };
                     
                     w.flush()
