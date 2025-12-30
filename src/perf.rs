@@ -314,6 +314,7 @@ impl BufferPool {
     /// Gets a buffer from the pool, or allocates a new one if the pool is empty.
     ///
     /// The returned buffer is automatically returned to the pool when dropped.
+    #[inline]
     pub fn get(&self) -> PooledBuffer {
         let mut buffers = self.buffers.borrow_mut();
         let buffer = buffers.pop().unwrap_or_else(|| vec![0u8; self.buffer_size]);
@@ -363,12 +364,14 @@ impl PooledBuffer {
 impl std::ops::Deref for PooledBuffer {
     type Target = Vec<u8>;
 
+    #[inline(always)]
     fn deref(&self) -> &Self::Target {
         self.buffer.as_ref().unwrap()
     }
 }
 
 impl std::ops::DerefMut for PooledBuffer {
+    #[inline(always)]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.buffer.as_mut().unwrap()
     }
