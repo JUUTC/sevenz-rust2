@@ -101,10 +101,6 @@ macro_rules! write_times {
 
 type Result<T> = std::result::Result<T, Error>;
 
-/// Maximum number of coders to use stack allocation for in collect_sizes.
-/// Most compressions use 1-3 coders (LZMA2, BCJ+LZMA2, Delta+BCJ+LZMA2).
-const MAX_STACK_CODERS: usize = 4;
-
 /// Writes a 7z archive file.
 pub struct ArchiveWriter<W: Write> {
     output: W,
@@ -569,106 +565,6 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
-
-                self.files.push(entry);
-                return Ok(self.files.last().unwrap());
-            }
-        }
-        entry.has_stream = false;
-        entry.size = 0;
-        entry.compressed_size = 0;
-        entry.has_crc = false;
-        self.files.push(entry);
-        Ok(self.files.last().unwrap())
-    }
-
-    /// Fast path for small files (< 4KB) - optimized for minimal overhead.
-    ///
-    /// This method skips some overhead that's unnecessary for very small files:
-    /// - Uses a smaller stack-allocated buffer
-    /// - Reduces function call overhead
-    /// - Optimized for cache locality
-    ///
-    /// # Performance
-    ///
-    /// For files < 4KB, this can be 20-30% faster than `push_archive_entry()`.
-    /// For workloads with many tiny files (e.g., configuration files, metadata),
-    /// this optimization can provide significant speedup.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use sevenz_rust2::*;
-    /// use std::io::Cursor;
-    ///
-    /// let mut archive = ArchiveWriter::create("config.7z").unwrap();
-    ///
-    /// // Many small config files
-    /// let small_data = b"key=value";
-    /// let entry = ArchiveEntry::new_file("config.txt");
-    /// archive.push_archive_entry_small(entry, Some(Cursor::new(small_data))).unwrap();
-    ///
-    /// archive.finish().unwrap();
-    /// ```
-    #[inline]
-    pub fn push_archive_entry_small<R: Read>(
-        &mut self,
-        mut entry: ArchiveEntry,
-        reader: Option<R>,
-    ) -> Result<&ArchiveEntry> {
-        if !entry.is_directory {
-            if let Some(mut r) = reader {
-                let mut compressed_len = 0;
-                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
-
-                let mut more_sizes: Vec<Rc<Cell<usize>>> =
-                    Vec::with_capacity(self.content_methods.len() - 1);
-
-                let (crc, size) = {
-                    let mut w = Self::create_writer(
-                        &self.content_methods,
-                        &mut compressed,
-                        &mut more_sizes,
-                    )?;
-                    let mut write_len = 0;
-                    let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-                    
-                    // Small stack-allocated buffer for tiny files
-                    let mut buf = [0u8; crate::perf::SMALL_BUFFER_SIZE];
-                    let mut total = 0usize;
-                    
-                    loop {
-                        match r.read(&mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                w.write_all(&buf[..n]).map_err(|e| {
-                                    Error::io_msg(e, "Encode small entry")
-                                })?;
-                                total += n;
-                            }
-                            Err(e) => {
-                                return Err(Error::io_msg(e, "Read small entry"));
-                            }
-                        }
-                    }
-                    
-                    w.flush().map_err(|e| Error::io_msg(e, "Flush small entry"))?;
-                    w.write(&[]).map_err(|e| Error::io_msg(e, "Finalize small entry"))?;
-
-                    (w.crc_value(), total)
-                };
-                
-                let compressed_crc = compressed.crc_value();
-                entry.has_stream = true;
-                entry.size = size as u64;
-                entry.crc = crc as u64;
-                entry.has_crc = true;
-                entry.compressed_crc = compressed_crc as u64;
-                entry.compressed_size = compressed_len as u64;
-                self.pack_info.add_stream(compressed_len as u64, compressed_crc);
-
-                let sizes = Self::collect_sizes(&more_sizes, size as u64);
-                self.unpack_info.add(self.content_methods.clone(), sizes, crc);
 
                 self.files.push(entry);
                 return Ok(self.files.last().unwrap());
