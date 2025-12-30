@@ -111,6 +111,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Throughput: {:.2} MB/s", (total_bytes as f64 / 1024.0 / 1024.0) / duration.as_secs_f64());
     }
     
+    // Method 4: Small file fast path (for tiny files)
+    println!("\n=== Method 4: Small file fast path (optimized for < 4KB) ===");
+    let start = Instant::now();
+    {
+        let mut archive = ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        
+        // Simulate many tiny files (config files, metadata, etc.)
+        for i in 0..file_count {
+            let name = format!("config_{:03}.ini", i);
+            let tiny_data = format!("key=value_{}", i).into_bytes();
+            let entry = ArchiveEntry::new_file(&name);
+            archive.push_archive_entry_small(entry, Some(Cursor::new(&tiny_data))).unwrap();
+        }
+        
+        let output = archive.finish().unwrap();
+        let compressed_size = output.into_inner().len();
+        let duration = start.elapsed();
+        
+        println!("Compressed {} tiny files to: {:.2} KB", file_count, compressed_size as f64 / 1024.0);
+        println!("Time: {:.2}s", duration.as_secs_f64());
+        println!("Files/sec: {:.0}", file_count as f64 / duration.as_secs_f64());
+    }
+    
     println!("\n=== Summary ===");
     println!("For {} files ({:.2} MB total):", file_count, total_bytes as f64 / 1024.0 / 1024.0);
     println!("- Standard method allocates {}× the total data size in buffers", file_count);
@@ -119,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nRecommendation:");
     println!("- Use batched mode for many small files (non-solid)");
     println!("- Use solid + parallel provider for best compression ratio");
+    println!("- Use small file fast path for tiny files (< 4KB) like configs");
     
     Ok(())
 }
