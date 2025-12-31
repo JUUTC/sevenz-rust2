@@ -308,8 +308,17 @@ fn test_compression_stats_integration() {
     let mut stats = CompressionStats::new();
 
     // Simulate compressing files of various sizes
-    // SMALL_BUFFER_SIZE = 4KB, XLARGE_BUFFER_SIZE = 1MB (1,048,576 bytes)
-    let sizes = [100, 1000, 10_000, 100_000, 2_000_000]; // 2MB is clearly large
+    // CompressionStats uses these thresholds from perf.rs:
+    // - Small: size < SMALL_BUFFER_SIZE (4KB = 4,096 bytes)
+    // - Medium: SMALL_BUFFER_SIZE <= size < XLARGE_BUFFER_SIZE (1MB = 1,048,576 bytes)
+    // - Large: size >= XLARGE_BUFFER_SIZE
+    let sizes = [
+        100,        // Small: 100 < 4,096
+        1000,       // Small: 1,000 < 4,096  
+        10_000,     // Medium: 4,096 <= 10,000 < 1,048,576
+        100_000,    // Medium: 4,096 <= 100,000 < 1,048,576
+        2_000_000,  // Large: 2,000,000 >= 1,048,576
+    ];
 
     for size in sizes {
         let compressed_size = size / 2; // Simulate 50% compression
@@ -321,13 +330,10 @@ fn test_compression_stats_integration() {
     assert!(stats.compression_ratio() > 0.0 && stats.compression_ratio() < 1.0);
     assert!(stats.throughput_mbps() > 0.0);
 
-    // Check file categorization
-    // Files: 100, 1000 < 4KB = small (2 files)
-    // Files: 10_000, 100_000 < 1MB = medium (2 files)
-    // Files: 2_000_000 > 1MB = large (1 file)
-    assert_eq!(stats.small_file_count(), 2); // 100, 1000 bytes
-    assert_eq!(stats.medium_file_count(), 2); // 10KB, 100KB
-    assert_eq!(stats.large_file_count(), 1); // 2MB
+    // Check file categorization (see thresholds above)
+    assert_eq!(stats.small_file_count(), 2);  // 100, 1000 bytes
+    assert_eq!(stats.medium_file_count(), 2); // 10KB, 100KB  
+    assert_eq!(stats.large_file_count(), 1);  // 2MB
 }
 
 #[cfg(all(feature = "compress", feature = "util"))]
@@ -475,7 +481,9 @@ fn test_e2e_millions_of_tiny_files_simulation() {
 
     // Verify stats
     assert_eq!(stats.file_count(), file_count);
-    assert_eq!(stats.small_file_count(), file_count as u64); // All should be tiny
+    // Files are ~20-30 bytes each, which is < 4KB (SMALL_BUFFER_SIZE)
+    // CompressionStats categorizes these as "small" files
+    assert_eq!(stats.small_file_count(), file_count as u64);
 
     // Verify archive is valid
     {

@@ -904,17 +904,13 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         mut entry: ArchiveEntry,
         data: &[u8],
     ) -> Result<&ArchiveEntry> {
+        // Handle empty data or directories early
         if entry.is_directory || data.is_empty() {
-            entry.has_stream = data.is_empty() && !entry.is_directory;
-            if entry.is_directory {
-                entry.has_stream = false;
-            }
-            entry.size = data.len() as u64;
+            // Directories never have streams; empty files have streams but no data
+            entry.has_stream = !entry.is_directory && data.is_empty();
+            entry.size = 0;
             entry.compressed_size = 0;
-            entry.has_crc = !data.is_empty();
-            if !data.is_empty() {
-                entry.crc = crc32fast::hash(data) as u64;
-            }
+            entry.has_crc = false;
             self.files.push(entry);
             return Ok(self.files.last().unwrap());
         }
@@ -1013,7 +1009,7 @@ impl<W: Write + Seek> ArchiveWriter<W> {
         data: &[u8],
         thresholds: Option<&crate::perf::FileSizeThresholds>,
     ) -> Result<&ArchiveEntry> {
-        let thresholds = thresholds.cloned().unwrap_or_default();
+        let thresholds = thresholds.copied().unwrap_or_default();
         let category = thresholds.categorize(data.len() as u64);
 
         match category {

@@ -992,7 +992,12 @@ impl CompressionStats {
         self.total_compressed_bytes += compressed_size;
         self.total_duration_nanos += duration.as_nanos() as u64;
 
-        // Categorize by size
+        // Categorize by size using fixed thresholds:
+        // - Small: < 4KB (SMALL_BUFFER_SIZE)
+        // - Medium: 4KB to 1MB (XLARGE_BUFFER_SIZE)
+        // - Large: >= 1MB
+        // Note: FileSizeThresholds uses different configurable thresholds.
+        // This fixed categorization is for simple throughput analysis.
         if uncompressed_size < SMALL_BUFFER_SIZE as u64 {
             self.small_file_count += 1;
         } else if uncompressed_size < XLARGE_BUFFER_SIZE as u64 {
