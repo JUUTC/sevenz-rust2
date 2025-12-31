@@ -84,3 +84,24 @@ required-features = ["default"]
 
 [package.metadata.docs.rs]
 all-features = true
+
+# Release profile optimizations for maximum performance
+# These settings help achieve C++-like performance
+[profile.release]
+lto = "fat"           # Enable full Link Time Optimization
+codegen-units = 1     # Single codegen unit for better optimization
+opt-level = 3         # Maximum optimization level
+panic = "abort"       # Smaller binary, faster code
+strip = "symbols"     # Strip symbols for smaller binary
+
+# Release with debug symbols (for profiling)
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+strip = "none"
+
+# Maximum performance profile
+[profile.bench]
+lto = "fat"
+codegen-units = 1
+opt-level = 3

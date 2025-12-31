@@ -53,6 +53,12 @@ pub enum Decoder<R: Read> {
 }
 
 impl<R: Read> Read for Decoder<R> {
+    /// Reads decompressed data.
+    /// 
+    /// This is on the hot path for all decompression operations.
+    /// The `#[inline(always)]` ensures the match is optimized away when
+    /// the decoder variant is known at compile time.
+    #[inline(always)]
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Decoder::Copy(r) => r.read(buf),

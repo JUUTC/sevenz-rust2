@@ -781,6 +781,607 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
     }
 }
 
+// =============================================================================
+// Thread-Safe Buffer Pool for Multi-Threaded Workloads
+// =============================================================================
+
+/// Thread-safe buffer pool for multi-threaded compression workloads.
+///
+/// Unlike [`BufferPool`] which uses `Rc<RefCell<>>` and is limited to single-threaded
+/// use, `SyncBufferPool` uses `Arc<Mutex<>>` to enable safe sharing across threads.
+///
+/// # Performance Considerations
+///
+/// - The mutex is only held briefly during get/return operations
+/// - For best performance, keep buffers for the duration of file processing
+/// - Consider using one pool per compression thread to reduce contention
+///
+/// # Example
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use std::thread;
+/// use sevenz_rust2::perf::{SyncBufferPool, LARGE_BUFFER_SIZE};
+///
+/// let pool = Arc::new(SyncBufferPool::new(16, LARGE_BUFFER_SIZE));
+///
+/// let handles: Vec<_> = (0..4).map(|_| {
+///     let pool = Arc::clone(&pool);
+///     thread::spawn(move || {
+///         let mut buffer = pool.get();
+///         // Use buffer for compression...
+///         buffer[0] = 42;
+///     })
+/// }).collect();
+///
+/// for handle in handles {
+///     handle.join().unwrap();
+/// }
+/// ```
+pub struct SyncBufferPool {
+    buffers: std::sync::Mutex<Vec<Vec<u8>>>,
+    buffer_size: usize,
+    max_buffers: usize,
+}
+
+impl SyncBufferPool {
+    /// Creates a new thread-safe buffer pool.
+    ///
+    /// # Arguments
+    /// * `max_buffers` - Maximum number of buffers to keep in the pool (1-256)
+    /// * `buffer_size` - Size of each buffer in bytes (clamped to 4KB-16MB)
+    pub fn new(max_buffers: usize, buffer_size: usize) -> Self {
+        let max_buffers = max_buffers.clamp(1, 256);
+        let buffer_size = buffer_size.clamp(SMALL_BUFFER_SIZE, MAX_BUFFER_SIZE);
+
+        Self {
+            buffers: std::sync::Mutex::new(Vec::with_capacity(max_buffers)),
+            buffer_size,
+            max_buffers,
+        }
+    }
+
+    /// Gets a buffer from the pool, or allocates a new one if the pool is empty.
+    ///
+    /// The returned buffer is automatically returned to the pool when dropped.
+    #[inline]
+    pub fn get(&self) -> SyncPooledBuffer<'_> {
+        let buffer = {
+            let mut buffers = self.buffers.lock().unwrap();
+            buffers.pop()
+        };
+        
+        let buffer = buffer.unwrap_or_else(|| vec![0u8; self.buffer_size]);
+
+        SyncPooledBuffer {
+            buffer: Some(buffer),
+            pool: self,
+        }
+    }
+
+    /// Returns the buffer size used by this pool.
+    pub fn buffer_size(&self) -> usize {
+        self.buffer_size
+    }
+
+    /// Returns the current number of buffers in the pool.
+    pub fn available_count(&self) -> usize {
+        self.buffers.lock().unwrap().len()
+    }
+
+    /// Returns a buffer to the pool.
+    fn return_buffer(&self, buffer: Vec<u8>) {
+        let mut buffers = self.buffers.lock().unwrap();
+        if buffers.len() < self.max_buffers {
+            buffers.push(buffer);
+        }
+        // Otherwise, let it drop (deallocate)
+    }
+}
+
+impl Default for SyncBufferPool {
+    fn default() -> Self {
+        Self::new(8, DEFAULT_BUFFER_SIZE)
+    }
+}
+
+// Safety: SyncBufferPool uses Mutex for synchronization
+unsafe impl Sync for SyncBufferPool {}
+unsafe impl Send for SyncBufferPool {}
+
+/// A buffer borrowed from a thread-safe pool.
+///
+/// This type implements `Deref` and `DerefMut` to `Vec<u8>`, so it can be used
+/// like a regular `Vec<u8>`.
+pub struct SyncPooledBuffer<'a> {
+    buffer: Option<Vec<u8>>,
+    pool: &'a SyncBufferPool,
+}
+
+impl SyncPooledBuffer<'_> {
+    /// Converts this pooled buffer into an owned Vec<u8>, preventing it from
+    /// being returned to the pool.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        self.buffer.take().unwrap()
+    }
+}
+
+impl std::ops::Deref for SyncPooledBuffer<'_> {
+    type Target = Vec<u8>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.buffer.as_ref().unwrap()
+    }
+}
+
+impl std::ops::DerefMut for SyncPooledBuffer<'_> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer.as_mut().unwrap()
+    }
+}
+
+impl Drop for SyncPooledBuffer<'_> {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            self.pool.return_buffer(buffer);
+        }
+    }
+}
+
+// =============================================================================
+// Compression Statistics Tracker
+// =============================================================================
+
+/// Statistics for tracking compression performance.
+///
+/// Use this to monitor throughput and identify bottlenecks when processing
+/// millions of files.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::CompressionStats;
+///
+/// let mut stats = CompressionStats::new();
+///
+/// // Record file processing
+/// stats.record_file(1024, 512, std::time::Duration::from_micros(100));
+/// stats.record_file(2048, 1024, std::time::Duration::from_micros(200));
+///
+/// println!("Total files: {}", stats.file_count());
+/// println!("Throughput: {:.2} MB/s", stats.throughput_mbps());
+/// println!("Compression ratio: {:.1}%", stats.compression_ratio() * 100.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CompressionStats {
+    file_count: u64,
+    total_uncompressed_bytes: u64,
+    total_compressed_bytes: u64,
+    total_duration_nanos: u64,
+    small_file_count: u64,   // Files < 4KB
+    medium_file_count: u64,  // Files 4KB - 1MB
+    large_file_count: u64,   // Files > 1MB
+}
+
+impl CompressionStats {
+    /// Creates a new empty statistics tracker.
+    pub fn new() -> Self {
+        Self {
+            file_count: 0,
+            total_uncompressed_bytes: 0,
+            total_compressed_bytes: 0,
+            total_duration_nanos: 0,
+            small_file_count: 0,
+            medium_file_count: 0,
+            large_file_count: 0,
+        }
+    }
+
+    /// Records statistics for a single file compression.
+    ///
+    /// # Arguments
+    /// * `uncompressed_size` - Original file size in bytes
+    /// * `compressed_size` - Compressed size in bytes
+    /// * `duration` - Time taken to compress the file
+    #[inline]
+    pub fn record_file(&mut self, uncompressed_size: u64, compressed_size: u64, duration: std::time::Duration) {
+        self.file_count += 1;
+        self.total_uncompressed_bytes += uncompressed_size;
+        self.total_compressed_bytes += compressed_size;
+        self.total_duration_nanos += duration.as_nanos() as u64;
+
+        // Categorize by size using fixed thresholds:
+        // - Small: < 4KB (SMALL_BUFFER_SIZE)
+        // - Medium: 4KB to 1MB (XLARGE_BUFFER_SIZE)
+        // - Large: >= 1MB
+        // Note: FileSizeThresholds uses different configurable thresholds.
+        // This fixed categorization is for simple throughput analysis.
+        if uncompressed_size < SMALL_BUFFER_SIZE as u64 {
+            self.small_file_count += 1;
+        } else if uncompressed_size < XLARGE_BUFFER_SIZE as u64 {
+            self.medium_file_count += 1;
+        } else {
+            self.large_file_count += 1;
+        }
+    }
+
+    /// Returns the total number of files processed.
+    pub fn file_count(&self) -> u64 {
+        self.file_count
+    }
+
+    /// Returns the total uncompressed bytes processed.
+    pub fn total_uncompressed_bytes(&self) -> u64 {
+        self.total_uncompressed_bytes
+    }
+
+    /// Returns the total compressed bytes output.
+    pub fn total_compressed_bytes(&self) -> u64 {
+        self.total_compressed_bytes
+    }
+
+    /// Returns the compression ratio (compressed / uncompressed).
+    ///
+    /// A value of 0.5 means the data was compressed to 50% of its original size.
+    pub fn compression_ratio(&self) -> f64 {
+        if self.total_uncompressed_bytes == 0 {
+            1.0
+        } else {
+            self.total_compressed_bytes as f64 / self.total_uncompressed_bytes as f64
+        }
+    }
+
+    /// Returns the throughput in megabytes per second (based on uncompressed size).
+    pub fn throughput_mbps(&self) -> f64 {
+        if self.total_duration_nanos == 0 {
+            0.0
+        } else {
+            let bytes_per_second = (self.total_uncompressed_bytes as f64 * 1_000_000_000.0)
+                / self.total_duration_nanos as f64;
+            bytes_per_second / (1024.0 * 1024.0)
+        }
+    }
+
+    /// Returns the average file size in bytes.
+    pub fn average_file_size(&self) -> u64 {
+        if self.file_count == 0 {
+            0
+        } else {
+            self.total_uncompressed_bytes / self.file_count
+        }
+    }
+
+    /// Returns the count of small files (< 4KB).
+    pub fn small_file_count(&self) -> u64 {
+        self.small_file_count
+    }
+
+    /// Returns the count of medium files (4KB - 1MB).
+    pub fn medium_file_count(&self) -> u64 {
+        self.medium_file_count
+    }
+
+    /// Returns the count of large files (> 1MB).
+    pub fn large_file_count(&self) -> u64 {
+        self.large_file_count
+    }
+
+    /// Returns the total processing duration.
+    pub fn total_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_nanos(self.total_duration_nanos)
+    }
+
+    /// Returns the average processing time per file.
+    pub fn average_duration_per_file(&self) -> std::time::Duration {
+        if self.file_count == 0 {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_nanos(self.total_duration_nanos / self.file_count)
+        }
+    }
+
+    /// Returns files processed per second.
+    pub fn files_per_second(&self) -> f64 {
+        if self.total_duration_nanos == 0 {
+            0.0
+        } else {
+            (self.file_count as f64 * 1_000_000_000.0) / self.total_duration_nanos as f64
+        }
+    }
+
+    /// Resets all statistics.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Merges another stats instance into this one.
+    ///
+    /// Useful for aggregating stats from multiple compression threads.
+    pub fn merge(&mut self, other: &CompressionStats) {
+        self.file_count += other.file_count;
+        self.total_uncompressed_bytes += other.total_uncompressed_bytes;
+        self.total_compressed_bytes += other.total_compressed_bytes;
+        self.total_duration_nanos += other.total_duration_nanos;
+        self.small_file_count += other.small_file_count;
+        self.medium_file_count += other.medium_file_count;
+        self.large_file_count += other.large_file_count;
+    }
+}
+
+impl Default for CompressionStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// Adaptive File Size Configuration
+// =============================================================================
+
+/// Thresholds for adaptive file processing.
+///
+/// These thresholds determine which compression strategy is used based on file size:
+/// - **Tiny** (< 4KB): Stack-allocated buffer, minimal overhead
+/// - **Small** (4KB - 64KB): Standard buffer, good for config files
+/// - **Medium** (64KB - 4MB): Large buffer, typical documents/images
+/// - **Large** (> 4MB): Hyper buffer, videos/archives
+#[derive(Debug, Clone, Copy)]
+pub struct FileSizeThresholds {
+    /// Maximum size for "tiny" files (default: 4KB)
+    pub tiny_threshold: u64,
+    /// Maximum size for "small" files (default: 64KB)
+    pub small_threshold: u64,
+    /// Maximum size for "medium" files (default: 4MB)
+    pub medium_threshold: u64,
+}
+
+impl Default for FileSizeThresholds {
+    fn default() -> Self {
+        Self {
+            tiny_threshold: SMALL_BUFFER_SIZE as u64,
+            small_threshold: DEFAULT_BUFFER_SIZE as u64,
+            medium_threshold: HYPER_BUFFER_SIZE as u64,
+        }
+    }
+}
+
+impl FileSizeThresholds {
+    /// Creates new thresholds with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates thresholds optimized for workloads with many tiny files.
+    ///
+    /// Raises the tiny threshold to 16KB to cover more files with the fast path.
+    pub fn for_tiny_files() -> Self {
+        Self {
+            tiny_threshold: 16 * 1024,  // 16KB
+            small_threshold: 128 * 1024, // 128KB
+            medium_threshold: HYPER_BUFFER_SIZE as u64,
+        }
+    }
+
+    /// Creates thresholds optimized for mixed workloads.
+    pub fn for_mixed_workload() -> Self {
+        Self::default()
+    }
+
+    /// Creates thresholds optimized for large files.
+    ///
+    /// Uses more aggressive buffer sizing for better throughput.
+    pub fn for_large_files() -> Self {
+        Self {
+            tiny_threshold: 1024,  // 1KB - only truly tiny files
+            small_threshold: 32 * 1024, // 32KB
+            medium_threshold: 16 * 1024 * 1024, // 16MB
+        }
+    }
+
+    /// Sets the tiny file threshold.
+    pub fn with_tiny_threshold(mut self, threshold: u64) -> Self {
+        self.tiny_threshold = threshold.clamp(512, 64 * 1024);
+        self
+    }
+
+    /// Sets the small file threshold.
+    pub fn with_small_threshold(mut self, threshold: u64) -> Self {
+        self.small_threshold = threshold.clamp(self.tiny_threshold, 1024 * 1024);
+        self
+    }
+
+    /// Sets the medium file threshold.
+    pub fn with_medium_threshold(mut self, threshold: u64) -> Self {
+        self.medium_threshold = threshold.clamp(self.small_threshold, 64 * 1024 * 1024);
+        self
+    }
+
+    /// Returns the recommended buffer size for a given file size.
+    #[inline]
+    pub fn buffer_size_for(&self, file_size: u64) -> usize {
+        if file_size <= self.tiny_threshold {
+            SMALL_BUFFER_SIZE
+        } else if file_size <= self.small_threshold {
+            DEFAULT_BUFFER_SIZE
+        } else if file_size <= self.medium_threshold {
+            LARGE_BUFFER_SIZE
+        } else {
+            HYPER_BUFFER_SIZE
+        }
+    }
+
+    /// Returns the file category for a given size.
+    #[inline]
+    pub fn categorize(&self, file_size: u64) -> FileCategory {
+        if file_size <= self.tiny_threshold {
+            FileCategory::Tiny
+        } else if file_size <= self.small_threshold {
+            FileCategory::Small
+        } else if file_size <= self.medium_threshold {
+            FileCategory::Medium
+        } else {
+            FileCategory::Large
+        }
+    }
+}
+
+/// File size category for adaptive processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileCategory {
+    /// Tiny files (< 4KB by default)
+    Tiny,
+    /// Small files (4KB - 64KB by default)
+    Small,
+    /// Medium files (64KB - 4MB by default)
+    Medium,
+    /// Large files (> 4MB by default)
+    Large,
+}
+
+impl FileCategory {
+    /// Returns the recommended buffer size for this category.
+    pub fn buffer_size(&self) -> usize {
+        match self {
+            FileCategory::Tiny => SMALL_BUFFER_SIZE,
+            FileCategory::Small => DEFAULT_BUFFER_SIZE,
+            FileCategory::Medium => LARGE_BUFFER_SIZE,
+            FileCategory::Large => HYPER_BUFFER_SIZE,
+        }
+    }
+}
+
+// =============================================================================
+// Batch Processing Configuration
+// =============================================================================
+
+/// Configuration for batch processing of many files.
+///
+/// This configuration helps optimize processing of millions of files by providing
+/// guidance on batch sizes, parallelism, and memory usage.
+///
+/// # Example
+///
+/// ```no_run
+/// use sevenz_rust2::perf::BatchConfig;
+///
+/// // For processing millions of tiny files from cache
+/// let config = BatchConfig::for_tiny_files(1_000_000);
+///
+/// println!("Recommended batch size: {}", config.batch_size);
+/// println!("Recommended parallelism: {}", config.parallelism);
+/// println!("Memory budget: {} MB", config.memory_budget_mb);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct BatchConfig {
+    /// Number of files to process in each batch
+    pub batch_size: usize,
+    /// Number of parallel compression threads
+    pub parallelism: usize,
+    /// Target memory budget in megabytes
+    pub memory_budget_mb: usize,
+    /// Whether to use solid compression for better ratio
+    pub use_solid_compression: bool,
+    /// File size thresholds for adaptive processing
+    pub thresholds: FileSizeThresholds,
+}
+
+impl BatchConfig {
+    /// Creates a configuration for processing tiny files (< 4KB).
+    ///
+    /// Optimizes for maximum throughput when compressing millions of small blobs.
+    pub fn for_tiny_files(estimated_file_count: usize) -> Self {
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        // For tiny files, use larger batches to amortize overhead
+        let batch_size = (estimated_file_count / 100).clamp(100, 10000);
+
+        Self {
+            batch_size,
+            parallelism,
+            memory_budget_mb: 512, // 512MB for tiny files is plenty
+            use_solid_compression: true, // Solid compression is best for many small files
+            thresholds: FileSizeThresholds::for_tiny_files(),
+        }
+    }
+
+    /// Creates a configuration for processing mixed file sizes.
+    pub fn for_mixed_workload(estimated_file_count: usize) -> Self {
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        let batch_size = (estimated_file_count / 50).clamp(50, 5000);
+
+        Self {
+            batch_size,
+            parallelism,
+            memory_budget_mb: 1024,
+            use_solid_compression: false, // Non-solid for mixed sizes
+            thresholds: FileSizeThresholds::for_mixed_workload(),
+        }
+    }
+
+    /// Creates a configuration for processing large files.
+    pub fn for_large_files(_estimated_file_count: usize) -> Self {
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        Self {
+            batch_size: 10, // Small batches for large files
+            parallelism,
+            memory_budget_mb: 2048, // More memory for large file buffers
+            use_solid_compression: false,
+            thresholds: FileSizeThresholds::for_large_files(),
+        }
+    }
+
+    /// Sets the batch size.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.clamp(1, 100000);
+        self
+    }
+
+    /// Sets the parallelism level.
+    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
+        self.parallelism = parallelism.clamp(1, 256);
+        self
+    }
+
+    /// Sets the memory budget in megabytes.
+    pub fn with_memory_budget_mb(mut self, mb: usize) -> Self {
+        self.memory_budget_mb = mb.clamp(64, 16384);
+        self
+    }
+
+    /// Sets whether to use solid compression.
+    pub fn with_solid_compression(mut self, use_solid: bool) -> Self {
+        self.use_solid_compression = use_solid;
+        self
+    }
+
+    /// Returns the recommended buffer pool size based on configuration.
+    pub fn recommended_pool_size(&self) -> usize {
+        // Use 2x parallelism for buffer pool to handle async I/O
+        (self.parallelism * 2).min(64)
+    }
+
+    /// Returns the recommended buffer size based on average file category.
+    pub fn recommended_buffer_size(&self, avg_file_size: u64) -> usize {
+        self.thresholds.buffer_size_for(avg_file_size)
+    }
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self::for_mixed_workload(10000)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,5 +1782,281 @@ mod tests {
         let pool = BufferPool::new(2, 100 * 1024 * 1024);
         let buffer = pool.get();
         assert_eq!(buffer.len(), MAX_BUFFER_SIZE); // Clamped to max 16MB
+    }
+
+    // =========================================================================
+    // Tests for SyncBufferPool
+    // =========================================================================
+
+    #[test]
+    fn test_sync_buffer_pool_basic() {
+        let pool = SyncBufferPool::new(4, DEFAULT_BUFFER_SIZE);
+
+        // Get a buffer
+        let mut buffer = pool.get();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+        buffer[0] = 42;
+
+        // Drop it
+        drop(buffer);
+
+        // Pool should have 1 buffer now
+        assert_eq!(pool.available_count(), 1);
+
+        // Get it again - should reuse
+        let buffer2 = pool.get();
+        assert_eq!(buffer2.len(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(buffer2[0], 42); // Previous data still there
+    }
+
+    #[test]
+    fn test_sync_buffer_pool_multiple() {
+        let pool = SyncBufferPool::new(3, LARGE_BUFFER_SIZE);
+
+        // Get 3 buffers
+        let b1 = pool.get();
+        let b2 = pool.get();
+        let b3 = pool.get();
+
+        assert_eq!(pool.available_count(), 0);
+
+        // Drop them
+        drop(b1);
+        assert_eq!(pool.available_count(), 1);
+        drop(b2);
+        assert_eq!(pool.available_count(), 2);
+        drop(b3);
+        assert_eq!(pool.available_count(), 3);
+    }
+
+    #[test]
+    fn test_sync_buffer_pool_thread_safety() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let pool = Arc::new(SyncBufferPool::new(8, DEFAULT_BUFFER_SIZE));
+
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let pool = Arc::clone(&pool);
+                thread::spawn(move || {
+                    // Get buffer and use it
+                    let mut buffer = pool.get();
+                    buffer[0] = i as u8;
+                    assert_eq!(buffer[0], i as u8);
+                    // Buffer returns to pool on drop
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All buffers should be returned to pool
+        assert!(pool.available_count() >= 1);
+    }
+
+    #[test]
+    fn test_sync_buffer_pool_into_vec() {
+        let pool = SyncBufferPool::new(2, DEFAULT_BUFFER_SIZE);
+        let mut buffer = pool.get();
+        buffer[0] = 99;
+
+        // Convert to owned Vec
+        let vec = buffer.into_vec();
+        assert_eq!(vec.len(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(vec[0], 99);
+
+        // Pool should not have received it back
+        assert_eq!(pool.available_count(), 0);
+    }
+
+    // =========================================================================
+    // Tests for CompressionStats
+    // =========================================================================
+
+    #[test]
+    fn test_compression_stats_basic() {
+        let mut stats = CompressionStats::new();
+
+        stats.record_file(1000, 500, std::time::Duration::from_micros(100));
+
+        assert_eq!(stats.file_count(), 1);
+        assert_eq!(stats.total_uncompressed_bytes(), 1000);
+        assert_eq!(stats.total_compressed_bytes(), 500);
+        assert!((stats.compression_ratio() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_compression_stats_multiple() {
+        let mut stats = CompressionStats::new();
+
+        // Add tiny file
+        stats.record_file(100, 80, std::time::Duration::from_micros(10));
+        // Add medium file
+        stats.record_file(100_000, 50_000, std::time::Duration::from_micros(1000));
+        // Add large file
+        stats.record_file(10_000_000, 5_000_000, std::time::Duration::from_micros(10000));
+
+        assert_eq!(stats.file_count(), 3);
+        assert_eq!(stats.small_file_count(), 1);  // 100 bytes < 4KB
+        assert_eq!(stats.medium_file_count(), 1); // 100KB
+        assert_eq!(stats.large_file_count(), 1);  // 10MB
+    }
+
+    #[test]
+    fn test_compression_stats_throughput() {
+        let mut stats = CompressionStats::new();
+
+        // 1MB in 1 second = 1 MB/s
+        stats.record_file(1_000_000, 500_000, std::time::Duration::from_secs(1));
+
+        // Should be approximately 1 MB/s (accounting for float precision)
+        let throughput = stats.throughput_mbps();
+        assert!(throughput > 0.9 && throughput < 1.1, "Expected ~1 MB/s, got {}", throughput);
+    }
+
+    #[test]
+    fn test_compression_stats_merge() {
+        let mut stats1 = CompressionStats::new();
+        stats1.record_file(1000, 500, std::time::Duration::from_micros(100));
+
+        let mut stats2 = CompressionStats::new();
+        stats2.record_file(2000, 1000, std::time::Duration::from_micros(200));
+
+        stats1.merge(&stats2);
+
+        assert_eq!(stats1.file_count(), 2);
+        assert_eq!(stats1.total_uncompressed_bytes(), 3000);
+        assert_eq!(stats1.total_compressed_bytes(), 1500);
+    }
+
+    #[test]
+    fn test_compression_stats_reset() {
+        let mut stats = CompressionStats::new();
+        stats.record_file(1000, 500, std::time::Duration::from_micros(100));
+        stats.reset();
+
+        assert_eq!(stats.file_count(), 0);
+        assert_eq!(stats.total_uncompressed_bytes(), 0);
+    }
+
+    #[test]
+    fn test_compression_stats_empty() {
+        let stats = CompressionStats::new();
+
+        assert_eq!(stats.file_count(), 0);
+        assert_eq!(stats.compression_ratio(), 1.0);
+        assert_eq!(stats.throughput_mbps(), 0.0);
+        assert_eq!(stats.average_file_size(), 0);
+        assert_eq!(stats.files_per_second(), 0.0);
+    }
+
+    // =========================================================================
+    // Tests for FileSizeThresholds
+    // =========================================================================
+
+    #[test]
+    fn test_file_size_thresholds_default() {
+        let thresholds = FileSizeThresholds::default();
+
+        assert_eq!(thresholds.tiny_threshold, SMALL_BUFFER_SIZE as u64);
+        assert_eq!(thresholds.small_threshold, DEFAULT_BUFFER_SIZE as u64);
+        assert_eq!(thresholds.medium_threshold, HYPER_BUFFER_SIZE as u64);
+    }
+
+    #[test]
+    fn test_file_size_thresholds_categorize() {
+        let thresholds = FileSizeThresholds::default();
+
+        assert_eq!(thresholds.categorize(100), FileCategory::Tiny);
+        assert_eq!(thresholds.categorize(10_000), FileCategory::Small);
+        assert_eq!(thresholds.categorize(100_000), FileCategory::Medium);
+        assert_eq!(thresholds.categorize(10_000_000), FileCategory::Large);
+    }
+
+    #[test]
+    fn test_file_size_thresholds_buffer_size() {
+        let thresholds = FileSizeThresholds::default();
+
+        assert_eq!(thresholds.buffer_size_for(100), SMALL_BUFFER_SIZE);
+        assert_eq!(thresholds.buffer_size_for(10_000), DEFAULT_BUFFER_SIZE);
+        assert_eq!(thresholds.buffer_size_for(100_000), LARGE_BUFFER_SIZE);
+        assert_eq!(thresholds.buffer_size_for(10_000_000), HYPER_BUFFER_SIZE);
+    }
+
+    #[test]
+    fn test_file_size_thresholds_presets() {
+        let tiny = FileSizeThresholds::for_tiny_files();
+        assert!(tiny.tiny_threshold > SMALL_BUFFER_SIZE as u64);
+
+        let large = FileSizeThresholds::for_large_files();
+        assert!(large.tiny_threshold < SMALL_BUFFER_SIZE as u64);
+    }
+
+    #[test]
+    fn test_file_category_buffer_size() {
+        assert_eq!(FileCategory::Tiny.buffer_size(), SMALL_BUFFER_SIZE);
+        assert_eq!(FileCategory::Small.buffer_size(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(FileCategory::Medium.buffer_size(), LARGE_BUFFER_SIZE);
+        assert_eq!(FileCategory::Large.buffer_size(), HYPER_BUFFER_SIZE);
+    }
+
+    // =========================================================================
+    // Tests for BatchConfig
+    // =========================================================================
+
+    #[test]
+    fn test_batch_config_for_tiny_files() {
+        let config = BatchConfig::for_tiny_files(1_000_000);
+
+        assert!(config.batch_size >= 100);
+        assert!(config.parallelism >= 1);
+        assert!(config.use_solid_compression);
+    }
+
+    #[test]
+    fn test_batch_config_for_mixed() {
+        let config = BatchConfig::for_mixed_workload(50_000);
+
+        assert!(config.batch_size >= 50);
+        assert!(config.parallelism >= 1);
+        assert!(!config.use_solid_compression);
+    }
+
+    #[test]
+    fn test_batch_config_for_large_files() {
+        let config = BatchConfig::for_large_files(100);
+
+        assert!(config.batch_size <= 100);
+        assert!(config.parallelism >= 1);
+        assert!(!config.use_solid_compression);
+    }
+
+    #[test]
+    fn test_batch_config_builder() {
+        let config = BatchConfig::default()
+            .with_batch_size(500)
+            .with_parallelism(8)
+            .with_memory_budget_mb(256)
+            .with_solid_compression(true);
+
+        assert_eq!(config.batch_size, 500);
+        assert_eq!(config.parallelism, 8);
+        assert_eq!(config.memory_budget_mb, 256);
+        assert!(config.use_solid_compression);
+    }
+
+    #[test]
+    fn test_batch_config_recommendations() {
+        let config = BatchConfig::for_tiny_files(10_000);
+
+        let pool_size = config.recommended_pool_size();
+        assert!(pool_size >= 2);
+        assert!(pool_size <= 64);
+
+        let buffer_size = config.recommended_buffer_size(1024);
+        assert!(buffer_size >= SMALL_BUFFER_SIZE);
     }
 }
