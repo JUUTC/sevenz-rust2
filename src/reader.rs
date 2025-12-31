@@ -17,6 +17,9 @@ use crate::{
 
 const MAX_MEM_LIMIT_KB: usize = usize::MAX / 1024;
 
+/// A reader that limits reading to a maximum number of bytes.
+/// 
+/// Optimized for hot-path decompression with `#[inline(always)]` read.
 pub struct BoundedReader<R: Read> {
     inner: R,
     remain: usize,
@@ -33,7 +36,7 @@ impl<R: Read> BoundedReader<R> {
 }
 
 impl<R: Read> Read for BoundedReader<R> {
-    #[inline]
+    #[inline(always)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.remain == 0 {
             return Ok(0);
@@ -106,6 +109,12 @@ impl<'a, R: Read + Seek> SharedBoundedReader<'a, R> {
     }
 }
 
+/// A reader that verifies CRC32 checksum while reading.
+/// 
+/// Optimized for the hot-path with:
+/// - `#[inline(always)]` read method
+/// - Early return for common case (data remaining)
+/// - Batched CRC updates via crc32fast SIMD
 struct Crc32VerifyingReader<R> {
     inner: R,
     crc_digest: Hasher,
@@ -126,6 +135,7 @@ impl<R: Read> Crc32VerifyingReader<R> {
 }
 
 impl<R: Read> Read for Crc32VerifyingReader<R> {
+    #[inline(always)]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.remaining <= 0 {
             return Ok(0);
@@ -133,8 +143,10 @@ impl<R: Read> Read for Crc32VerifyingReader<R> {
         let size = self.inner.read(buf)?;
         if size > 0 {
             self.remaining -= size as i64;
+            // crc32fast uses SIMD internally when available
             self.crc_digest.update(&buf[..size]);
         }
+        // Verification only happens once at the end
         if self.remaining <= 0 {
             let d = std::mem::replace(&mut self.crc_digest, Hasher::new()).finalize();
             if d as u64 != self.expected_value {

@@ -57,6 +57,11 @@ pub(crate) enum Encoder<W: Write> {
 }
 
 impl<W: Write> Write for Encoder<W> {
+    /// Writes data to the encoder.
+    /// 
+    /// This is on the hot path for all compression operations.
+    /// Empty writes (`&[]`) trigger encoder finalization.
+    #[inline(always)]
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Some encoder need to finish the encoding process. Because of lifetime limitations on
         // dynamic dispatch, we need to implement an implicit contract, where empty writes with
@@ -179,6 +184,7 @@ impl<W: Write> Write for Encoder<W> {
         }
     }
 
+    #[inline]
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Encoder::Copy(w) => w.flush(),
