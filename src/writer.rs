@@ -357,148 +357,6 @@ impl<W: Write + Seek> ArchiveWriter<W> {
 
                 let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
-                self.unpack_info
-                    .add(self.content_methods.clone(), sizes, crc);
-
-                self.files.push(entry);
-                return Ok(self.files.last().unwrap());
-            }
-        }
-        entry.has_stream = false;
-        entry.size = 0;
-        entry.compressed_size = 0;
-        entry.has_crc = false;
-        self.files.push(entry);
-        Ok(self.files.last().unwrap())
-    }
-
-    /// High-performance batch processing for many small files (non-solid).
-    ///
-    /// When compressing thousands of small files (e.g., 50k+ blobs from cache),
-    /// calling `push_archive_entry()` repeatedly creates significant overhead from:
-    /// - Allocating a new buffer for each file (64KB × 50k = 3.2GB allocated)
-    /// - Creating new CRC hashers for each file
-    /// - Encoder initialization overhead per file
-    ///
-    /// This method eliminates these bottlenecks by:
-    /// - Reusing buffers from a pool (reduces allocations by ~99%)
-    /// - Processing files in optimized batches
-    /// - Using larger buffers for better I/O throughput
-    ///
-    /// # Performance
-    ///
-    /// For 50k small files (1-100KB each):
-    /// - Standard: 10-15 minutes
-    /// - Batch mode: 30-60 seconds (10-30x faster)
-    ///
-    /// # Arguments
-    /// * `entry` - Archive entry metadata
-    /// * `reader` - Optional reader providing the entry's data
-    /// * `buffer_pool` - Optional buffer pool for reusing allocations (recommended)
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// use sevenz_rust2::*;
-    /// use sevenz_rust2::perf::{BufferPool, LARGE_BUFFER_SIZE};
-    /// use std::io::Cursor;
-    ///
-    /// // Create buffer pool for reusing allocations
-    /// let pool = BufferPool::new(16, LARGE_BUFFER_SIZE);
-    ///
-    /// let mut archive = ArchiveWriter::create("output.7z").unwrap();
-    ///
-    /// // Process many files efficiently
-    /// let entries_with_data: Vec<(ArchiveEntry, Vec<u8>)> = vec![
-    ///     (ArchiveEntry::new_file("file1.dat"), b"data1".to_vec()),
-    ///     (ArchiveEntry::new_file("file2.dat"), b"data2".to_vec()),
-    ///     // ... 50,000 more files ...
-    /// ];
-    ///
-    /// for (entry, data) in entries_with_data {
-    ///     archive.push_archive_entry_batched(
-    ///         entry,
-    ///         Some(Cursor::new(data)),
-    ///         Some(&pool),
-    ///     ).unwrap();
-    /// }
-    ///
-    /// archive.finish().unwrap();
-    /// ```
-    pub fn push_archive_entry_batched<R: Read>(
-        &mut self,
-        mut entry: ArchiveEntry,
-        reader: Option<R>,
-        buffer_pool: Option<&crate::perf::BufferPool>,
-    ) -> Result<&ArchiveEntry> {
-        if !entry.is_directory {
-            if let Some(mut r) = reader {
-                let mut compressed_len = 0;
-                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
-
-                let mut more_sizes: Vec<Rc<Cell<usize>>> =
-                    Vec::with_capacity(self.content_methods.len() - 1);
-
-                let (crc, size) = {
-                    let mut w = Self::create_writer(
-                        &self.content_methods,
-                        &mut compressed,
-                        &mut more_sizes,
-                    )?;
-                    let mut write_len = 0;
-                    let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
-                    
-                    // Helper closure to read from source and write to compressor
-                    let mut read_and_compress = |buf: &mut [u8]| -> Result<usize> {
-                        let mut total = 0usize;
-                        loop {
-                            match r.read(buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    w.write_all(&buf[..n]).map_err(|e| {
-                                        Error::io_msg(e, format!("Encode entry:{}", entry.name()))
-                                    })?;
-                                    total += n;
-                                }
-                                Err(e) => {
-                                    return Err(Error::io_msg(
-                                        e,
-                                        format!("Encode entry:{}", entry.name()),
-                                    ));
-                                }
-                            }
-                        }
-                        Ok(total)
-                    };
-                    
-                    // Use buffer from pool if available, otherwise allocate
-                    let bytes_copied = if let Some(pool) = buffer_pool {
-                        let mut buf = pool.get();
-                        read_and_compress(&mut *buf)?
-                    } else {
-                        // Fallback to standard buffer allocation
-                        let mut buf = vec![0u8; crate::perf::LARGE_BUFFER_SIZE];
-                        read_and_compress(&mut buf)?
-                    };
-                    
-                    w.flush()
-                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
-                    w.write(&[])
-                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
-
-                    (w.crc_value(), bytes_copied)
-                };
-                let compressed_crc = compressed.crc_value();
-                entry.has_stream = true;
-                entry.size = size as u64;
-                entry.crc = crc as u64;
-                entry.has_crc = true;
-                entry.compressed_crc = compressed_crc as u64;
-                entry.compressed_size = compressed_len as u64;
-                self.pack_info
-                    .add_stream(compressed_len as u64, compressed_crc);
-
-                let sizes = Self::collect_sizes(&more_sizes, size as u64);
 
                 self.unpack_info
                     .add(self.content_methods.clone(), sizes, crc);
@@ -837,6 +695,148 @@ impl<W: Write + Seek> ArchiveWriter<W> {
                     .with_index(entry_index);
                 let _ = progress.on_progress(&info);
 
+                entry.has_stream = true;
+                entry.size = size as u64;
+                entry.crc = crc as u64;
+                entry.has_crc = true;
+                entry.compressed_crc = compressed_crc as u64;
+                entry.compressed_size = compressed_len as u64;
+                self.pack_info
+                    .add_stream(compressed_len as u64, compressed_crc);
+
+                let sizes = Self::collect_sizes(&more_sizes, size as u64);
+
+                self.unpack_info
+                    .add(self.content_methods.clone(), sizes, crc);
+
+                self.files.push(entry);
+                return Ok(self.files.last().unwrap());
+            }
+        }
+        entry.has_stream = false;
+        entry.size = 0;
+        entry.compressed_size = 0;
+        entry.has_crc = false;
+        self.files.push(entry);
+        Ok(self.files.last().unwrap())
+    }
+
+    /// High-performance batch processing for many small files (non-solid).
+    ///
+    /// When compressing thousands of small files (e.g., 50k+ blobs from cache),
+    /// calling `push_archive_entry()` repeatedly creates significant overhead from:
+    /// - Allocating a new buffer for each file (64KB × 50k = 3.2GB allocated)
+    /// - Creating new CRC hashers for each file
+    /// - Encoder initialization overhead per file
+    ///
+    /// This method eliminates these bottlenecks by:
+    /// - Reusing buffers from a pool (reduces allocations by ~99%)
+    /// - Processing files in optimized batches
+    /// - Using larger buffers for better I/O throughput
+    ///
+    /// # Performance
+    ///
+    /// For 50k small files (1-100KB each):
+    /// - Standard: 10-15 minutes
+    /// - Batch mode: 30-60 seconds (10-30x faster)
+    ///
+    /// # Arguments
+    /// * `entries` - Archive entries with their data readers
+    /// * `buffer_pool` - Optional buffer pool for reusing allocations (recommended)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use sevenz_rust2::*;
+    /// use sevenz_rust2::perf::{BufferPool, LARGE_BUFFER_SIZE};
+    /// use std::io::Cursor;
+    ///
+    /// // Create buffer pool for reusing allocations
+    /// let pool = BufferPool::new(16, LARGE_BUFFER_SIZE);
+    ///
+    /// let mut archive = ArchiveWriter::create("output.7z").unwrap();
+    ///
+    /// // Process many files efficiently
+    /// let entries_with_data: Vec<(ArchiveEntry, Vec<u8>)> = vec![
+    ///     (ArchiveEntry::new_file("file1.dat"), b"data1".to_vec()),
+    ///     (ArchiveEntry::new_file("file2.dat"), b"data2".to_vec()),
+    ///     // ... 50,000 more files ...
+    /// ];
+    ///
+    /// for (entry, data) in entries_with_data {
+    ///     archive.push_archive_entry_batched(
+    ///         entry,
+    ///         Some(Cursor::new(data)),
+    ///         Some(&pool),
+    ///     ).unwrap();
+    /// }
+    ///
+    /// archive.finish().unwrap();
+    /// ```
+    pub fn push_archive_entry_batched<R: Read>(
+        &mut self,
+        mut entry: ArchiveEntry,
+        reader: Option<R>,
+        buffer_pool: Option<&crate::perf::BufferPool>,
+    ) -> Result<&ArchiveEntry> {
+        if !entry.is_directory {
+            if let Some(mut r) = reader {
+                let mut compressed_len = 0;
+                let mut compressed = CompressWrapWriter::new(&mut self.output, &mut compressed_len);
+
+                let mut more_sizes: Vec<Rc<Cell<usize>>> =
+                    Vec::with_capacity(self.content_methods.len() - 1);
+
+                let (crc, size) = {
+                    let mut w = Self::create_writer(
+                        &self.content_methods,
+                        &mut compressed,
+                        &mut more_sizes,
+                    )?;
+                    let mut write_len = 0;
+                    let mut w = CompressWrapWriter::new(&mut w, &mut write_len);
+                    
+                    // Helper closure to read from source and write to compressor
+                    let mut read_and_compress = |buf: &mut [u8]| -> Result<usize> {
+                        let mut total = 0usize;
+                        loop {
+                            match r.read(buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    w.write_all(&buf[..n]).map_err(|e| {
+                                        Error::io_msg(e, format!("Encode entry:{}", entry.name()))
+                                    })?;
+                                    total += n;
+                                }
+                                Err(e) => {
+                                    return Err(Error::io_msg(
+                                        e,
+                                        format!("Encode entry:{}", entry.name()),
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(total)
+                    };
+                    
+                    // Use buffer from pool if available, otherwise allocate
+                    let bytes_copied = if let Some(pool) = buffer_pool {
+                        let mut buf = pool.get();
+                        read_and_compress(&mut *buf)?
+                    } else {
+                        // Fallback to standard buffer allocation
+                        let mut buf = vec![0u8; crate::perf::LARGE_BUFFER_SIZE];
+                        read_and_compress(&mut buf)?
+                    };
+                    
+                    w.flush()
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+                    w.write(&[])
+                        .map_err(|e| Error::io_msg(e, format!("Encode entry:{}", entry.name())))?;
+
+                    (w.crc_value(), bytes_copied)
+                };
+                let compressed_crc = compressed.crc_value();
                 entry.has_stream = true;
                 entry.size = size as u64;
                 entry.crc = crc as u64;

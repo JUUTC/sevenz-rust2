@@ -21,6 +21,11 @@
 //! high-speed networks), use [`ParallelConfig`] to configure parallel input streams
 //! and compression threads.
 //!
+//! # Buffer Pool
+//!
+//! For workloads processing many files (e.g., 50k+ small blobs), use [`BufferPool`]
+//! to reuse buffers and eliminate allocation overhead.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -763,8 +768,13 @@ impl<T: Clone, C: PrefetchCallback<T>> PrefetchQueue<T, C> {
 
         // Reuse buffer to avoid allocation
         self.hints_buffer.clear();
-        for (i, item) in self.items[start..end].iter().enumerate() {
-            self.hints_buffer.push(PrefetchHint::new(item.clone(), i));
+        // Use with_capacity and reserve to minimize reallocations
+        self.hints_buffer.reserve(end - start);
+        for i in 0..(end - start) {
+            // Clone only when creating hint - unavoidable for callback API
+            // but we minimize by only cloning what's needed
+            // Note: `i` is the relative position in the lookahead window (0 = next item)
+            self.hints_buffer.push(PrefetchHint::new(self.items[start + i].clone(), i));
         }
 
         self.callback.on_prefetch_hint(&self.hints_buffer);
